@@ -7,32 +7,52 @@ import {
 } from 'abstract-leveldown'
 
 const DEFAULT_RETHINKDB_PORT = 28015
+const DEFAULT_RETHINKDB_HOST = 'localhost'
 const DEFAULT_RETHINKDB_DB = 'test'
 const TIMEOUT_RX = /(.*)(timeout=)(\d+)(.*)/i
+const PUT_OPERATION = 'put'
+const DEL_OPERATION = 'del'
 
 // Error messages
-const ERR_NOT_FOUND = 'NotFound'
+const ERR_DB_DNE = 'Database %s does not exist'
 const ERR_INVALID_KEY = 'InvalidKey'
+const ERR_INVALID_LOCATION = 'Invalid location'
+const ERR_INVALID_BATCH_OP = 'Invalid batch operation. Valid operations are "put" and "del"'
+const ERR_INVALID_PARAM = 'Invalid parameter %s must be type %s with valid value'
+const ERR_INVALID_PRIMARY_KEY = 'Database %s table %s does not have its primary key set ' +
+  'to "key" and cannot be used, please re-create the table with the option ' +
+  '"{ primaryKey: \'key\' }" or remove the table and use the "createIfMissing" option' +
+  'in the open method'
+const ERR_NO_DB_HOST = 'No hostname found in location'
+const ERR_NO_DB_TABLE = 'No table found in location'
+const ERR_NO_RETHINK_DRIVER = 'No RethinkDB driver was provided'
+const ERR_NOT_FOUND = 'Key %s not found'
+const ERR_TABLE_DNE = 'Table %s does not exist'
 const ERR_TABLE_EXISTS = 'TableExists'
-const ERR_TABLE_NOT_EXISTS = 'TableNotExists'
-
-
-const ERR_COULD_NOT_CREATE_DB = 'Could not create new Database instance'
 const ERR_REQUIRES_CALLBACK = '%s() requires a callback argument'
 
-// checks if the object is empty
+/**
+ * Determines if an object is empty, which includes null, undefined, '', [], {}, and Buffer(0)
+ * @param {*} obj
+ * @return {boolean}
+ */
 function isEmpty (obj) {
   if (obj === null
     || obj === undefined
     || obj === ''
     || (Array.isArray(obj) && !obj.length)
-    || (obj instanceof Buffer && !obj.length)) {
+    || (obj instanceof Buffer && !obj.length)
+    || (typeof obj === 'object' && !Object.keys(obj).length)) {
     return true
   }
   return false
 }
 
-// coerces the key to a valid format
+/**
+ * Coerces the key to a valid value or returns an error object if the key is invalid
+ * @param {string|buffer} key
+ * @return {string|buffer|Error}
+ */
 function coerceKey (key) {
   if (isEmpty(key)) return new Error(ERR_INVALID_KEY)
   if (!(key instanceof Buffer) && typeof key !== 'string') key = String(key)
@@ -40,13 +60,23 @@ function coerceKey (key) {
   return key
 }
 
-// parses the location as a connection string for database connection info
+/**
+ * Parses the location string for database connection properties
+ * @param {string} location - connection string or table name
+ * @return {object}
+ */
 function parseLocation (location) {
   let options = {}
-  let { auth, hostname, port, query, pathname } = url.parse(location)
+  let { protocol, auth, hostname, port, query, pathname } = url.parse(location)
+
+  // check for location
+  if (!protocol) {
+    hostname = DEFAULT_RETHINKDB_HOST
+    pathname = `/${location}`
+  }
 
   // add host
-  if (!hostname) return new Error('no hostname specified in connection string')
+  if (!hostname) return new Error(ERR_NO_DB_HOST)
   else options.host = hostname
 
   // add port
@@ -56,7 +86,7 @@ function parseLocation (location) {
 
   // add db and table
   let [ , db, table ] = (pathname ? pathname : '').split('/')
-  if (!db) return new Error('no database or table specified in connection string')
+  if (!db) return new Error(ERR_NO_DB_TABLE)
   if (!table) {
     table = db
     db = DEFAULT_RETHINKDB_DB
@@ -136,9 +166,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @param {object} r - rethinkdb driver
    */
   constructor (location, r) {
-    if (typeof location !== 'string') {
-      throw new Error('location must be in connection string format (i.e. rethinkdb://localhost/test/leveldown)')
-    }
+    if (typeof location !== 'string') throw new Error(ERR_INVALID_LOCATION)
     super(location)
 
     // store rethinkdb driver and initialize connection
@@ -158,7 +186,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
 
   /**
    * opens a database connection and optionally creates the database and/or table
-   * @param {object} options
+   * @param {object} [options]
    * @callback callback
    * @returns {*}
    * @private
@@ -197,22 +225,19 @@ class RethinkDOWN extends AbstractLevelDOWN {
                     r.db(db).table(this.$table).config()('primary_key').eq('key')
                       .branch(
                         true,
-                        r.error('database ' + db + ' table ' + this.$table + ' does not have its primary key set ' +
-                          'to "key" and cannot be used, please re-create the table with the option ' +
-                          '"{ primaryKey: \'key\' }" or remove the table and use the "createIfMissing" option' +
-                          'in the open method')
+                        r.error(util.format(ERR_INVALID_PRIMARY_KEY, db, this.$table))
                       )
                   ),
                 r.expr(createIfMissing)
                   .branch(
                     r.db(db).tableCreate(this.$table, { primaryKey: 'key' }),
-                    r.error(`table ${this.table} does not exist`)
+                    r.error(util.format(ERR_TABLE_DNE, this.$table))
                   )
               ),
             r.expr(createIfMissing)
               .branch(
                 r.dbCreate(db).do(() => r.db(db).tableCreate(this.$table, { primaryKey: 'key' })),
-                r.error(`database ${db} does not exist`)
+                r.error(util.format(ERR_DB_DNE, db))
               )
           )
           .run(this.$connection)
@@ -237,8 +262,8 @@ class RethinkDOWN extends AbstractLevelDOWN {
       // otherwise use synchronous driver
       this.$r = r(this.$connectOptions)
       return processOptions()
-    } catch (err) {
-      return callback(err)
+    } catch (error) {
+      return callback(error.msg ? new Error(error.msg) : error)
     }
   }
 
@@ -258,8 +283,8 @@ class RethinkDOWN extends AbstractLevelDOWN {
         this.$r.getPoolMaster().drain()
         return callback()
       }
-    } catch (err) {
-      return callback(err)
+    } catch (error) {
+      return callback(error.msg ? new Error(error.msg) : error)
     }
   }
 
@@ -295,7 +320,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
         .do((result) => {
           return result.eq(null)
             .branch(
-              r.error('NotFound'),
+              r.error(util.format(ERR_NOT_FOUND, key)),
               result('value')
                 .default(null)
                 .do((value) => {
@@ -321,16 +346,16 @@ class RethinkDOWN extends AbstractLevelDOWN {
           return callback(error.msg ? new Error(error.msg) : error)
         })
 
-    } catch (err) {
-      return callback(err)
+    } catch (error) {
+      return callback(error.msg ? new Error(error.msg) : error)
     }
   }
 
   /**
    * adds a value at a specific key
    * @param {string|buffer} key
-   * @param value
-   * @param options
+   * @param {string|buffer} value
+   * @param {object} [options]
    * @callback callback
    * @return {*}
    * @private
@@ -357,11 +382,14 @@ class RethinkDOWN extends AbstractLevelDOWN {
       // coerce the value into a valid value
       value = (isEmpty(value) || isEmpty(String(value)))
         ? ''
-        : String(value)
+        : (value instanceof Buffer)
+          ? value
+          : String(value)
 
       // insert the value using durability an conflict to emulate sync option and avoid
       // branch statements for insert and update
-      return this.$t.insert({ key, value }, { durability, conflict, returnChanges })
+      return this.$t.insert({ key, value }, { conflict, durability, returnChanges })
+        .pluck('errors', 'first_error')
         .run(this.$connection)
         .then((results) => {
           let { errors, first_error } = results
@@ -371,8 +399,8 @@ class RethinkDOWN extends AbstractLevelDOWN {
         .catch((error) => {
           return callback(error.msg ? new Error(error.msg) : error)
         })
-    } catch (err) {
-      return callback(err)
+    } catch (error) {
+      return callback(error.msg ? new Error(error.msg) : error)
     }
   }
 
@@ -405,24 +433,149 @@ class RethinkDOWN extends AbstractLevelDOWN {
       return this.$t.get(key)
         .eq(null)
         .branch(
-          this.$r.error('NotFound')
+          this.$r.error(util.format(ERR_NOT_FOUND, key)),
+          this.$t.get(key).delete({ durability, returnChanges })
         )
+        .pluck('errors', 'first_error')
+        .run(this.$connection)
+        .then((results) => {
+          let { errors, first_error } = results
+          if (errors && first_error) return callback(new Error(first_error))
+          return callback()
+        })
+        .catch((error) => {
+          return callback(error.msg ? new Error(error.msg) : error)
+        })
 
-    } catch (err) {
-
+    } catch (error) {
+      return callback(error.msg ? new Error(error.msg) : error)
     }
   }
 
-  _batch () {
+  /**
+   * Performs batch operations of put and/or delete
+   * @param {array} operations
+   * @param {object} [options]
+   * @callback callback
+   * @private
+   */
+  _batch (operations, options, callback) {
+    // support chained batch
+    if (!operations) return new RethinkChaindBatch()
 
+    // standard use
+    if (typeof options === 'function') {
+      callback = options
+      options = {}
+    }
+
+    try {
+      if (typeof callback !== 'function') {
+        throw new Error(util.format(ERR_REQUIRES_CALLBACK, 'batch'))
+      } else if (!Array.isArray(operations) || operations.length === 0) {
+        throw new Error(util.format(ERR_INVALID_PARAM, 'operations', 'array'))
+      }
+
+      let ops = []
+      let { sync } = options
+      let returnChanges = true
+      let conflict = 'update'
+      let durability = (sync === true)
+        ? 'hard'
+        : 'soft'
+
+      // validate the operations list
+      for (const operation of operations) {
+        let { type, key, value } = operation
+
+        // validate the key
+        key = coerceKey(key)
+        if (key instanceof Error) return callback(key)
+
+        // determine the operation type and create an operation object
+        switch (type) {
+          case PUT_OPERATION:
+            // coerce the value into a valid value
+            value = (isEmpty(value) || isEmpty(String(value)))
+              ? ''
+              : (value instanceof Buffer)
+                ? value
+                : String(value)
+            ops.push({ type: PUT_OPERATION, key, value })
+            break
+
+          case DEL_OPERATION:
+            ops.push({ type: DEL_OPERATION, key })
+            break
+
+          default:
+            return callback(new Error(ERR_INVALID_BATCH_OP))
+        }
+      }
+
+      // perform operations
+      return this.$r.expr(ops).forEach((op) => {
+        return op('type').eq(PUT_OPERATION)
+          .branch(
+            this.$t.insert({ key: op('key'), value: op('value') }, { conflict, durability, returnChanges }),
+            this.$t.get(op('key'))
+              .eq(null)
+              .branch(
+                this.$r.error(util.format(ERR_NOT_FOUND, op('key'))),
+                this.$t.get(op('key')).delete({ durability, returnChanges })
+              )
+          )
+      })
+        .pluck('errors', 'first_error')
+        .run(this.$connection)
+        .then((results) => {
+          let { errors, first_error } = results
+          if (errors && first_error) return callback(new Error(first_error))
+          return callback()
+        })
+        .catch((error) => {
+          return callback(error.msg ? new Error(error.msg) : error)
+        })
+
+    } catch (error) {
+      return callback(error.msg ? new Error(error.msg) : error)
+    }
   }
 
   _chainedBatch () {
 
   }
 
-  _approximateSize () {
+  /**
+   * Gets count of records, doesnt really apply/work with rethinkdb
+   * @param {string|buffer} start
+   * @param {string|buffer} end
+   * @callback callback
+   * @return {number}
+   * @private
+   */
+  _approximateSize (start, end, callback) {
+    if (typeof callback !== 'function') {
+      throw new Error(util.format(ERR_REQUIRES_CALLBACK, 'approximateSize'))
+    } else if (typeof start !== 'string' && !(start instanceof Buffer)) {
+      return callback(new Error(util.format(ERR_INVALID_PARAM, 'start', 'string or Buffer')))
+    } else if (typeof end !== 'string' && !(end instanceof Buffer)) {
+      return callback(new Error(util.format(ERR_INVALID_PARAM, 'end', 'string or Buffer')))
+    }
 
+    try {
+      return this.$r.filter((record) => record.ge(start).and(record.le(end)))
+        .count()
+        .run(this.$connection)
+        .then((size) => {
+          return callback(null, size)
+        })
+        .catch((error) => {
+          return callback(error.msg ? new Error(error.msg) : error)
+        })
+    } catch (error) {
+      return callback(error.msg ? new Error(error.msg) : error)
+    }
   }
 
   _serializeKey () {
@@ -449,7 +602,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
  * @return {DOWN}
  */
 export default function (r) {
-  if (!r) throw new Error('no rethinkdb driver was provided')
+  if (!r) throw new Error(ERR_NO_RETHINK_DRIVER)
 
   /**
    *
