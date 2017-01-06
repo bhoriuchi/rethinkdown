@@ -1,3 +1,8 @@
+/**
+ * RethinkDOWN
+ * @description A RethinkDB implementation of the LevelDOWN API
+ * @author Branden Horiuchi <bhoriuchi@gmail.com>
+ */
 import util from 'util'
 import url from 'url'
 import {
@@ -6,10 +11,16 @@ import {
   AbstractChainedBatch
 } from 'abstract-leveldown'
 
+// defaults
 const DEFAULT_RETHINKDB_PORT = 28015
 const DEFAULT_RETHINKDB_HOST = 'localhost'
 const DEFAULT_RETHINKDB_DB = 'test'
+
+// regex
 const TIMEOUT_RX = /(.*)(timeout=)(\d+)(.*)/i
+const NO_MORE_ROWS_RX = /no more rows/i
+
+// property values
 const PUT_OPERATION = 'put'
 const DEL_OPERATION = 'del'
 const KEY = 'key'
@@ -111,25 +122,17 @@ function parseLocation (location) {
   return options
 }
 
+/**
+ * Chained Batch class
+ * @extends AbstractChainedBatch
+ */
 class RethinkChainedBatch extends AbstractChainedBatch {
-  constructor () {
-    super()
-  }
-
-  _put () {
-
-  }
-
-  _del () {
-
-  }
-
-  _clear () {
-
-  }
-
-  _write () {
-
+  /**
+   * Creates a new RethinkChainedBatch
+   * @param {object} db - rethinkdown instance
+   */
+  constructor (db) {
+    super(db)
   }
 }
 
@@ -192,7 +195,11 @@ class RethinkIterator extends AbstractIterator {
       // wait for query to resolve
       return this._query.then((cursor) => {
         return cursor.next((error, row) => {
-          if (error) return callback(DOWNError(error))
+          if (error) {
+            return (typeof error.msg === 'string' && error.msg.match(NO_MORE_ROWS_RX))
+              ? callback()
+              : callback(DOWNError(error))
+          }
           let { key, value } = row
           key = asBuffer(key, this._keyAsBuffer)
           value = asBuffer(value, this._valueAsBuffer)
@@ -215,8 +222,9 @@ class RethinkIterator extends AbstractIterator {
     try {
       return this._query.then((cursor) => {
         return cursor.close((error) => {
-          if (error) return callback(DOWNError(error))
-          return callback()
+          return error
+            ? callback(DOWNError(error))
+            : callback()
         })
       }, (error) => {
         return callback(DOWNError(error))
@@ -319,8 +327,8 @@ class RethinkDOWN extends AbstractLevelDOWN {
 
       // check for standard rethinkdb driver
       if (typeof r.connect === 'function') {
-        return r.connect(this.$connectOptions, (err, connection) => {
-          if (err) return callback(err)
+        return r.connect(this.$connectOptions, (error, connection) => {
+          if (error) return callback(DOWNError(error))
           this.$connection = connection
           return processOptions()
         })
@@ -540,7 +548,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @private
    */
   _chainedBatch () {
-    return new RethinkChainedBatch()
+    return new RethinkChainedBatch(this)
   }
 
   /**
@@ -601,8 +609,68 @@ export default function (r) {
     return new RethinkDOWN(location, r)
   }
 
-  DOWN.destroy = () => true
-  DOWN.repair = () => true
+  /**
+   * Connects to the database and returns the cursor, connection, and parsed location
+   * @param {string} location - connection string
+   * @callback callback
+   * @return {*}
+   */
+  DOWN.connect = (location, callback) => {
+    if (typeof location !== 'string') throw DOWNError('requires a location string argument')
+    if (typeof callback !== 'function') throw DOWNError('destroy() requires a callback argument')
+    let opts = parseLocation(location)
+    if (opts instanceof Error) throw DOWNError(opts)
+
+    try {
+      let { host, port, db, table, user, password, timeout } = opts
+      let connectOptions = { host, port, db, user, password, timeout }
+
+      // async connection
+      if (typeof r.connect === 'function') {
+        return r.connect(connectOptions, (error, connection) => {
+          if (error) return callback(DOWNError(error))
+          return callback(null, r, connection, opts)
+        })
+      }
+
+      // sync connection
+      r = r(connectOptions)
+      return callback(null, r, {}, opts)
+
+    } catch (error) {
+      return callback(DOWNError(error))
+    }
+  }
+
+  /**
+   * Destroys the table specified by the location
+   * @param {string} location - connection string
+   * @callback callback
+   * @return {*}
+   */
+  DOWN.destroy = (location, callback) => {
+    if (typeof callback !== 'function') throw DOWNError('destroy() requires a callback argument')
+
+    try {
+      return DOWN.connect(location, (error, cursor, connection, opts) => {
+        if (error) return callback(DOWNError(error))
+        let { db, table } = opts
+        return cursor.db(db)
+          .tableDrop(table)
+          .run(connection, (error) => {
+            if (error ) callback(DOWNError(error))
+            return callback()
+          })
+      })
+    } catch (error) {
+      return callback(DOWNError(error))
+    }
+  }
+
+  DOWN.repair = (location, callback) => {
+    if (typeof callback !== 'function') throw DOWNError('repair() requires a callback argument')
+    return callback(DOWNError('repair not implemented'))
+  }
 
   // return the creation method
   return DOWN

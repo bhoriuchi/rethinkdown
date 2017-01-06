@@ -11,8 +11,6 @@
   "scripts": {
     "build:copybrc": "cp build/.build.babelrc src/.babelrc",
     "build:rmbrc": "rm -f src/.babelrc",
-    "buildexample": "npm run build && rollup example/example.js --output example/build.js --format cjs && node example/build.js --harmony",
-    "example": "node example/index.js --harmony",
     "build": "cp build/.build.babelrc src/.babelrc && rollup -c build/rollup.config.js && rm -f src/.babelrc",
     "test": "npm run build && mocha test/index.js"
   },
@@ -29,6 +27,8 @@
     "babel-runtime": "^6.20.0",
     "babel-register": "^6.18.0",
     "mocha": "^3.0.0",
+    "rethinkdb": "^2.3.3",
+    "rethinkdbdash": "^2.3.27",
     "rollup": "^0.38.0",
     "rollup-plugin-babel": "^2.7.0",
     "babel-preset-es2015-rollup": "^3.0.0"
@@ -41,7 +41,13 @@
     "example": "example"
   },
   "keywords": [
+    "rethink",
     "rethinkdb",
-    "leveldown"
+    "rethinkdbdash",
+    "level",
+    "levelup",
+    "leveldown",
+    "database",
+    "db"
   ]
 }
