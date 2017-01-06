@@ -12,11 +12,11 @@ const DEFAULT_RETHINKDB_DB = 'test'
 const TIMEOUT_RX = /(.*)(timeout=)(\d+)(.*)/i
 const PUT_OPERATION = 'put'
 const DEL_OPERATION = 'del'
+const KEY = 'key'
+const VALUE = 'value'
 
 // Error messages
 const ERR_DB_DNE = 'Database %s does not exist'
-const ERR_INVALID_KEY = 'InvalidKey'
-const ERR_INVALID_LOCATION = 'Invalid location'
 const ERR_INVALID_BATCH_OP = 'Invalid batch operation. Valid operations are "put" and "del"'
 const ERR_INVALID_PARAM = 'Invalid parameter %s must be type %s with valid value'
 const ERR_INVALID_PRIMARY_KEY = 'Database %s table %s does not have its primary key set ' +
@@ -32,32 +32,37 @@ const ERR_TABLE_EXISTS = 'TableExists'
 const ERR_REQUIRES_CALLBACK = '%s() requires a callback argument'
 
 /**
- * Determines if an object is empty, which includes null, undefined, '', [], {}, and Buffer(0)
- * @param {*} obj
- * @return {boolean}
+ * Gets an error object, for rethinkdb errors use the msg field
+ * @param error
+ * @return {Error}
  */
-function isEmpty (obj) {
-  if (obj === null
-    || obj === undefined
-    || obj === ''
-    || (Array.isArray(obj) && !obj.length)
-    || (obj instanceof Buffer && !obj.length)
-    || (typeof obj === 'object' && !Object.keys(obj).length)) {
-    return true
+function DOWNError (error) {
+  if (error instanceof Error) {
+    return error.msg
+      ? new Error(error.msg)
+      : error
+  } else if (typeof error === 'object') {
+    try {
+      return new Error(JSON.stringify(error))
+    } catch (err) {
+      return new Error(String(error))
+    }
   }
-  return false
+  return new Error(String(error))
 }
 
 /**
- * Coerces the key to a valid value or returns an error object if the key is invalid
- * @param {string|buffer} key
- * @return {string|buffer|Error}
+ * Ensures that the value is a buffer or string
+ * @param value
+ * @param ensureBuffer
+ * @return {Buffer}
  */
-function coerceKey (key) {
-  if (isEmpty(key)) return new Error(ERR_INVALID_KEY)
-  if (!(key instanceof Buffer) && typeof key !== 'string') key = String(key)
-  if (isEmpty(key)) return new Error(ERR_INVALID_KEY)
-  return key
+function asBuffer(value, ensureBuffer = true) {
+  return (ensureBuffer && !Buffer.isBuffer(value))
+    ? new Buffer(value)
+    : Buffer.isBuffer(value )
+      ? value.toString()
+      : value
 }
 
 /**
@@ -76,7 +81,7 @@ function parseLocation (location) {
   }
 
   // add host
-  if (!hostname) return new Error(ERR_NO_DB_HOST)
+  if (!hostname) return DOWNError(ERR_NO_DB_HOST)
   else options.host = hostname
 
   // add port
@@ -86,7 +91,7 @@ function parseLocation (location) {
 
   // add db and table
   let [ , db, table ] = (pathname ? pathname : '').split('/')
-  if (!db) return new Error(ERR_NO_DB_TABLE)
+  if (!db) return DOWNError(ERR_NO_DB_TABLE)
   if (!table) {
     table = db
     db = DEFAULT_RETHINKDB_DB
@@ -126,32 +131,104 @@ class RethinkChainedBatch extends AbstractChainedBatch {
   _write () {
 
   }
-
-  _serializeKey () {
-
-  }
-
-  _serializeValue () {
-
-  }
 }
 
+/**
+ * Rethink Iterator
+ * @extends AbstractIterator
+ */
 class RethinkIterator extends AbstractIterator {
-  constructor (db, options) {
+  /**
+   * Creates a new Iterator
+   * @param {object} db - RethinkDOWN instance
+   * @param {object} [options]
+   */
+  constructor (db, options = {}) {
     super(db)
+    let r = db.$r
+    let query = db.$t
+
+    let { gt, gte, lt, lte, start, end, reverse, keys, values, limit, keyAsBuffer, valueAsBuffer } = options
+    this._keyAsBuffer = keyAsBuffer !== false
+    this._valueAsBuffer = valueAsBuffer !== false
+
+    // logic ported from mongodown - https://github.com/watson/mongodown
+    if (reverse) {
+      if (start) query = query.filter(r.row(KEY).le(start))
+      if (end) query = query.filter(r.row(KEY).ge(end))
+      if (gt) query = query.filter(r.row(KEY).lt(gt))
+      if (gte) query = query.filter(r.row(KEY).le(gte))
+      if (lt) query = query.filter(r.row(KEY).gt(lt))
+      if (lte) query = query.filter(r.row(KEY).ge(lte))
+    } else {
+      if (start) query = query.filter(r.row(KEY).ge(start))
+      if (end) query = query.filter(r.row(KEY).le(end))
+      if (gt) query = query.filter(r.row(KEY).gt(gt))
+      if (gte) query = query.filter(r.row(KEY).ge(gte))
+      if (lt) query = query.filter(r.row(KEY).lt(lt))
+      if (lte) query = query.filter(r.row(KEY).le(lte))
+    }
+
+    // sort the results by key depending on reverse value
+    query = query.orderBy(reverse ? r.desc(KEY) : r.asc(KEY))
+
+    // set limit
+    query = (typeof limit === 'number' && limit >= 0)
+      ? query.limit(limit)
+      : query
+
+    // run query
+    this._query = query.run(db.$connection, { cursor: true })
   }
 
-  _next () {
-
+  /**
+   * Gets the next key in the iterator results
+   * @callback callback
+   * @return {*}
+   * @private
+   */
+  _next (callback) {
+    try {
+      // wait for query to resolve
+      return this._query.then((cursor) => {
+        return cursor.next((error, row) => {
+          if (error) return callback(DOWNError(error))
+          let { key, value } = row
+          key = asBuffer(key, this._keyAsBuffer)
+          value = asBuffer(value, this._valueAsBuffer)
+          return callback(null, key, value)
+        })
+      }, (error) => {
+        return callback(DOWNError(error))
+      })
+    } catch (error) {
+      return callback(DOWNError(error))
+    }
   }
 
-  _end () {
-
+  /**
+   * Destroys the iterator and closes the cursor
+   * @callback callback
+   * @private
+   */
+  _end (callback) {
+    try {
+      return this._query.then((cursor) => {
+        return cursor.close((error) => {
+          if (error) return callback(DOWNError(error))
+          return callback()
+        })
+      }, (error) => {
+        return callback(DOWNError(error))
+      })
+    } catch (error) {
+      return callback(DOWNError(error))
+    }
   }
 
   // not implemented in abstract?
-  seek () {
-
+  seek (key) {
+    throw DOWNError('seek is not implemented')
   }
 }
 
@@ -166,7 +243,6 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @param {object} r - rethinkdb driver
    */
   constructor (location, r) {
-    if (typeof location !== 'string') throw new Error(ERR_INVALID_LOCATION)
     super(location)
 
     // store rethinkdb driver and initialize connection
@@ -192,12 +268,6 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @private
    */
   _open (options, callback) {
-    if (typeof options === 'function') {
-      callback = options
-      options = {}
-    }
-    if (typeof callback !== 'function') throw new Error(util.format(ERR_REQUIRES_CALLBACK, 'open'))
-
     try {
       // support some of the open options
       let r = this.$r
@@ -222,7 +292,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
                 r.expr(errorIfExists)
                   .branch(
                     r.error(ERR_TABLE_EXISTS),
-                    r.db(db).table(this.$table).config()('primary_key').eq('key')
+                    r.db(db).table(this.$table).config()('primary_key').eq(KEY)
                       .branch(
                         true,
                         r.error(util.format(ERR_INVALID_PRIMARY_KEY, db, this.$table))
@@ -230,23 +300,20 @@ class RethinkDOWN extends AbstractLevelDOWN {
                   ),
                 r.expr(createIfMissing)
                   .branch(
-                    r.db(db).tableCreate(this.$table, { primaryKey: 'key' }),
+                    r.db(db).tableCreate(this.$table, { primaryKey: KEY }),
                     r.error(util.format(ERR_TABLE_DNE, this.$table))
                   )
               ),
             r.expr(createIfMissing)
               .branch(
-                r.dbCreate(db).do(() => r.db(db).tableCreate(this.$table, { primaryKey: 'key' })),
+                r.dbCreate(db).do(() => r.db(db).tableCreate(this.$table, { primaryKey: KEY })),
                 r.error(util.format(ERR_DB_DNE, db))
               )
           )
-          .run(this.$connection)
-          .then(() => {
+          .run(this.$connection, (error) => {
+            if (error) return callback(DOWNError(error))
             this.$t = r.db(db).table(this.$table)
             return callback()
-          })
-          .catch((error) => {
-            callback(error.msg ? new Error(error.msg) : error)
           })
       }
 
@@ -259,11 +326,13 @@ class RethinkDOWN extends AbstractLevelDOWN {
         })
       }
 
-      // otherwise use synchronous driver
+      // otherwise use synchronous driver (rethinkdbdash)
       this.$r = r(this.$connectOptions)
+      this.$connection = {}
       return processOptions()
+
     } catch (error) {
-      return callback(error.msg ? new Error(error.msg) : error)
+      return callback(DOWNError(error))
     }
   }
 
@@ -274,8 +343,6 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @private
    */
   _close (callback) {
-    if (typeof callback !== 'function') throw new Error(util.format(ERR_REQUIRES_CALLBACK, 'close'))
-
     try {
       if (this.$connection && typeof this.$connection.close === 'function') {
         return this.$connection.close(callback)
@@ -284,7 +351,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
         return callback()
       }
     } catch (error) {
-      return callback(error.msg ? new Error(error.msg) : error)
+      return callback(DOWNError(error))
     }
   }
 
@@ -297,31 +364,19 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @private
    */
   _get (key, options, callback) {
-    if (typeof options === 'function') {
-      callback = options
-      options = {}
-    }
-    if (typeof callback !== 'function') throw new Error(util.format(ERR_REQUIRES_CALLBACK, 'get'))
-
     try {
       let r = this.$r
       let table = this.$t
       let { asBuffer } = options
 
-      asBuffer = (typeof asBuffer === 'boolean')
-        ? asBuffer
-        : true
-
-      key = coerceKey(key)
-      if (key instanceof Error) return callback(key)
-
+      // get the key
       return table.get(key)
         .default(null)
         .do((result) => {
           return result.eq(null)
             .branch(
               r.error(util.format(ERR_NOT_FOUND, key)),
-              result('value')
+              result(VALUE)
                 .default(null)
                 .do((value) => {
                   return r.expr([null, ''])
@@ -338,16 +393,13 @@ class RethinkDOWN extends AbstractLevelDOWN {
                 })
             )
         })
-        .run(this.$connection)
-        .then((value) => {
-          return callback(null, value)
+        .run(this.$connection, (error, value) => {
+          return error
+            ? callback(DOWNError(error))
+            : callback(null, value)
         })
-        .catch((error) => {
-          return callback(error.msg ? new Error(error.msg) : error)
-        })
-
     } catch (error) {
-      return callback(error.msg ? new Error(error.msg) : error)
+      return callback(DOWNError(error))
     }
   }
 
@@ -361,12 +413,6 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @private
    */
   _put (key, value, options, callback) {
-    if (typeof options === 'function') {
-      callback = options
-      options = {}
-    }
-    if (typeof callback !== 'function') throw new Error(util.format(ERR_REQUIRES_CALLBACK, 'put'))
-
     try {
       let { sync } = options
       let conflict = 'update'
@@ -375,32 +421,18 @@ class RethinkDOWN extends AbstractLevelDOWN {
         ? 'hard'
         : 'soft'
 
-      // coerce the key into a valid value or throw error
-      key = coerceKey(key)
-      if (key instanceof Error) return callback(key)
-
-      // coerce the value into a valid value
-      value = (isEmpty(value) || isEmpty(String(value)))
-        ? ''
-        : (value instanceof Buffer)
-          ? value
-          : String(value)
-
       // insert the value using durability an conflict to emulate sync option and avoid
       // branch statements for insert and update
       return this.$t.insert({ key, value }, { conflict, durability, returnChanges })
         .pluck('errors', 'first_error')
-        .run(this.$connection)
-        .then((results) => {
+        .run(this.$connection, (error, results) => {
+          if (error) return callback(DOWNError(error))
           let { errors, first_error } = results
-          if (errors && first_error) return callback(new Error(first_error))
+          if (errors && first_error) return callback(DOWNError(first_error))
           return callback()
         })
-        .catch((error) => {
-          return callback(error.msg ? new Error(error.msg) : error)
-        })
     } catch (error) {
-      return callback(error.msg ? new Error(error.msg) : error)
+      return callback(DOWNError(error))
     }
   }
 
@@ -413,12 +445,6 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @private
    */
   _del (key, options, callback) {
-    if (typeof options === 'function') {
-      callback = options
-      options = {}
-    }
-    if (typeof callback !== 'function') throw new Error(util.format(ERR_REQUIRES_CALLBACK, 'del'))
-
     try {
       let { sync } = options
       let returnChanges = true
@@ -426,10 +452,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
         ? 'hard'
         : 'soft'
 
-      // coerce the key into a valid value or throw error
-      key = coerceKey(key)
-      if (key instanceof Error) return callback(key)
-
+      // delete the record
       return this.$t.get(key)
         .eq(null)
         .branch(
@@ -437,18 +460,14 @@ class RethinkDOWN extends AbstractLevelDOWN {
           this.$t.get(key).delete({ durability, returnChanges })
         )
         .pluck('errors', 'first_error')
-        .run(this.$connection)
-        .then((results) => {
+        .run(this.$connection, (error, results) => {
+          if (error) return callback(DOWNError(error))
           let { errors, first_error } = results
-          if (errors && first_error) return callback(new Error(first_error))
+          if (errors && first_error) return callback(DOWNError(first_error))
           return callback()
         })
-        .catch((error) => {
-          return callback(error.msg ? new Error(error.msg) : error)
-        })
-
     } catch (error) {
-      return callback(error.msg ? new Error(error.msg) : error)
+      return callback(DOWNError(error))
     }
   }
 
@@ -460,22 +479,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @private
    */
   _batch (operations, options, callback) {
-    // support chained batch
-    if (!operations) return new RethinkChaindBatch()
-
-    // standard use
-    if (typeof options === 'function') {
-      callback = options
-      options = {}
-    }
-
     try {
-      if (typeof callback !== 'function') {
-        throw new Error(util.format(ERR_REQUIRES_CALLBACK, 'batch'))
-      } else if (!Array.isArray(operations) || operations.length === 0) {
-        throw new Error(util.format(ERR_INVALID_PARAM, 'operations', 'array'))
-      }
-
       let ops = []
       let { sync } = options
       let returnChanges = true
@@ -488,19 +492,11 @@ class RethinkDOWN extends AbstractLevelDOWN {
       for (const operation of operations) {
         let { type, key, value } = operation
 
-        // validate the key
-        key = coerceKey(key)
-        if (key instanceof Error) return callback(key)
-
         // determine the operation type and create an operation object
         switch (type) {
           case PUT_OPERATION:
             // coerce the value into a valid value
-            value = (isEmpty(value) || isEmpty(String(value)))
-              ? ''
-              : (value instanceof Buffer)
-                ? value
-                : String(value)
+            value = this._serializeValue(value)
             ops.push({ type: PUT_OPERATION, key, value })
             break
 
@@ -509,7 +505,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
             break
 
           default:
-            return callback(new Error(ERR_INVALID_BATCH_OP))
+            return callback(DOWNError(ERR_INVALID_BATCH_OP))
         }
       }
 
@@ -517,33 +513,34 @@ class RethinkDOWN extends AbstractLevelDOWN {
       return this.$r.expr(ops).forEach((op) => {
         return op('type').eq(PUT_OPERATION)
           .branch(
-            this.$t.insert({ key: op('key'), value: op('value') }, { conflict, durability, returnChanges }),
-            this.$t.get(op('key'))
+            this.$t.insert({ key: op(KEY), value: op(VALUE) }, { conflict, durability, returnChanges }),
+            this.$t.get(op(KEY))
               .eq(null)
               .branch(
-                this.$r.error(util.format(ERR_NOT_FOUND, op('key'))),
-                this.$t.get(op('key')).delete({ durability, returnChanges })
+                this.$r.error(util.format(ERR_NOT_FOUND, op(KEY))),
+                this.$t.get(op(KEY)).delete({ durability, returnChanges })
               )
           )
       })
         .pluck('errors', 'first_error')
-        .run(this.$connection)
-        .then((results) => {
+        .run(this.$connection, (error, results) => {
+          if (error) return callback(DOWNError(error))
           let { errors, first_error } = results
-          if (errors && first_error) return callback(new Error(first_error))
+          if (errors && first_error) return callback(DOWNError(first_error))
           return callback()
         })
-        .catch((error) => {
-          return callback(error.msg ? new Error(error.msg) : error)
-        })
-
     } catch (error) {
-      return callback(error.msg ? new Error(error.msg) : error)
+      return callback(DOWNError(error))
     }
   }
 
+  /**
+   * Returns a new chained batch
+   * @return {RethinkChainedBatch}
+   * @private
+   */
   _chainedBatch () {
-
+    return new RethinkChainedBatch()
   }
 
   /**
@@ -556,43 +553,33 @@ class RethinkDOWN extends AbstractLevelDOWN {
    */
   _approximateSize (start, end, callback) {
     if (typeof callback !== 'function') {
-      throw new Error(util.format(ERR_REQUIRES_CALLBACK, 'approximateSize'))
+      throw DOWNError(util.format(ERR_REQUIRES_CALLBACK, 'approximateSize'))
     } else if (typeof start !== 'string' && !(start instanceof Buffer)) {
-      return callback(new Error(util.format(ERR_INVALID_PARAM, 'start', 'string or Buffer')))
+      return callback(DOWNError(util.format(ERR_INVALID_PARAM, 'start', 'string or Buffer')))
     } else if (typeof end !== 'string' && !(end instanceof Buffer)) {
-      return callback(new Error(util.format(ERR_INVALID_PARAM, 'end', 'string or Buffer')))
+      return callback(DOWNError(util.format(ERR_INVALID_PARAM, 'end', 'string or Buffer')))
     }
 
     try {
       return this.$r.filter((record) => record.ge(start).and(record.le(end)))
         .count()
-        .run(this.$connection)
-        .then((size) => {
+        .run(this.$connection, (error, size) => {
+          if (error) return callback(DOWNError(error))
           return callback(null, size)
         })
-        .catch((error) => {
-          return callback(error.msg ? new Error(error.msg) : error)
-        })
     } catch (error) {
-      return callback(error.msg ? new Error(error.msg) : error)
+      return callback(DOWNError(error))
     }
   }
 
-  _serializeKey () {
-
-  }
-
-  _serializeValue () {
-
-  }
-
+  /**
+   * Returns a new iterator
+   * @param options
+   * @return {RethinkIterator}
+   * @private
+   */
   _iterator (options) {
     return new RethinkIterator(this, options)
-  }
-
-  // not implemented in abstract?
-  getProperty () {
-
   }
 }
 
@@ -602,7 +589,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
  * @return {DOWN}
  */
 export default function (r) {
-  if (!r) throw new Error(ERR_NO_RETHINK_DRIVER)
+  if (!r) throw DOWNError(ERR_NO_RETHINK_DRIVER)
 
   /**
    *
