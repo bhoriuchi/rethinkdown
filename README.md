@@ -66,8 +66,8 @@ The location connection string takes the following format
 * [`port=28015`] : non-default port database is listening on
 * [`db=test`] : specific database to use
 * `table` : table name to use as the `LevelDOWN` database
-* [timeout] : optional timeout argument for connection
-* [silent] : boolean option (`true` or `false`) for silent connection to `rethinkdbdash`
+* [`timeout`] : optional timeout argument for connection
+* [`silent`] : boolean option (`true` or `false`) for silent connection to `rethinkdbdash`
 
 If a string not prefixed by `rethinkdb://` is supplied it will be assumed as the `tableName` and `rethinkdown` will attempt to connect to `rethinkdb://localhost:28015/test/tableName`
 
