@@ -4,7 +4,7 @@ import rethinkdown from '../../index'
 
 function iteratorTest (options, nexts, driver, done) {
   let nextCount = 0
-  let down = rethinkdown(driver)(rethinkLocation)
+  let down = rethinkdown(driver, dbName, dbOptions)(dbTable)
 
   let cleanup = (error, iter) => {
     return iter.end((err) => {

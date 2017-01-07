@@ -2,7 +2,9 @@ import chai from 'chai'
 import unitTests from './unit/index'
 global.chai = chai
 global.expect = chai.expect
-global.rethinkLocation = 'rethinkdb://localhost/test/rethinkdown?silent=true'
+global.dbName = 'test'
+global.dbOptions = { silent: true }
+global.dbTable = 'rethinkdown'
 
 // run tests
 describe('RethinkDOWN Tests', () => {

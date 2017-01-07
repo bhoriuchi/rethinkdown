@@ -3,7 +3,7 @@ import rethinkdbdash from 'rethinkdbdash'
 import rethinkdown from '../../index'
 
 function approx (start, end, driver, done) {
-  let down = rethinkdown(driver)(rethinkLocation)
+  let down = rethinkdown(driver, dbName, dbOptions)(dbTable)
   down.open({ createIfMissing: true }, (error) => {
     if (error) return done(error)
     return down.approximateSize(start, end, (error, size) => {

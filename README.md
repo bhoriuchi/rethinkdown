@@ -8,11 +8,14 @@ A RethinkDB implementation of the LevelDOWN API
 #### Example (ES6)
 
 ```js
-import rethinkdb from 'rethinkdb'
+import r from 'rethinkdb'
 import rethinkdown from 'rethinkdown'
 
-let down = rethinkdown(rethinkdb)
-let db = down('rethinkdb://my.host.com/development/down')
+const database = 'test'
+const options = { host: 'db.myserver.com' }
+const table = 'mydbtable'
+
+let db = rethinkdown(r, database, options)(table)
 
 db.open({ createIfMissing: true }, (error) => {
   db.put('1', 'one', (error) => {
@@ -31,14 +34,28 @@ db.open({ createIfMissing: true }, (error) => {
 
 Refer to the [`LevelDOWN`](https://github.com/level/leveldown) or [`AbstractLevelDOWN`](https://github.com/Level/abstract-leveldown) documentation for full API
 
-A `RethinDOWN` instance needs to first be initialized with either a `rethinkdb` or `rethinkdbdash` driver
+---
+
+##### RethinkDOWN ( `driver`, [`database`], [`connectOptions`] )
+
+A `RethinDOWN` instance needs to first be initialized with either a `rethinkdb` or `rethinkdbdash` driver, optional database name, and optional connection options
+
+**Parameters**
+
+* `driver` {[`rethinkdb`](https://github.com/rethinkdb/rethinkdb)|[`rethinkdbdash`](https://www.npmjs.com/package/rethinkdbdash)} - Supported RethinkDB driver
+* [`database="test"`] {[`String`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String)} - Database name to use
+* [`connectOptions`] {[`Object`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object)} - A rethinkdb or rethinkdbdash [connect](https://rethinkdb.com/api/javascript/connect/) options object
+
+**Returns** {[`rethinkdown`](#rethinkdown)} - Instance of `rethinkdown` that can be passed a location/table
+
+###### Example
 
 ```js
-import rethinkdbdash from 'rethinkdbdash'
-import rethinkdown from 'rethinkdown'
+import r from 'rethinkdbdash'
+import RethinkDOWN from 'rethinkdown'
 
-let db = rethinkdown(rethinkdbdash)
-
+let rethinkdown = RethinkDOWN(r, 'test', { silent: true })
+let db = rethinkdown('myleveldb')
 ```
 ---
 
@@ -56,30 +73,4 @@ returns a new RethinkDOWN instance
 
 #### location
 
-The location connection string takes the following format
-
-`rethinkdb://[user:password@]host[:port]/[db/]table[?timeout=number&silent=boolean]`
-
-* [`user`] : username for the database
-* [`password`] : password for the user
-* `host` : hostname of the database server (i.e. `localhost`)
-* [`port=28015`] : non-default port database is listening on
-* [`db=test`] : specific database to use
-* `table` : table name to use as the `LevelDOWN` database
-* [`timeout`] : optional timeout argument for connection
-* [`silent`] : boolean option (`true` or `false`) for silent connection to `rethinkdbdash`
-
-If a string not prefixed by `rethinkdb://` is supplied it will be assumed as the `tableName` and `rethinkdown` will attempt to connect to `rethinkdb://localhost:28015/test/tableName`
-
-##### location Examples
-
-```js
-"rethinkdb://localhost/test/leveldb"
-"rethinkdb://my.domain.com/test/leveldb"
-"rethinkdb://my.domain.com/leveldb"
-"rethinkdb://my.domain.com/test/leveldb?timeout=1000"
-"rethinkdb://my.domain.com/test/leveldb?silent=true"
-"rethinkdb://my.domain.com/test/leveldb?timeout=100&silent=true"
-"rethinkdb://me:mypassword@my.domain.com/test/leveldb"
-"leveldb"
-```
+The location should be the name of the table that should be used as the LevelDB store. All `non-alphanumeric` and `_` characters will be replaced with `_`

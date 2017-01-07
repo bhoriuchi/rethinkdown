@@ -17,13 +17,12 @@ const DEFAULT_RETHINKDB_HOST = 'localhost'
 const DEFAULT_RETHINKDB_DB = 'test'
 
 // regex
-const TIMEOUT_RX = /(.*)(timeout=)(\d+)(.*)/i
-const SILENT_RX = /(.*)(silent=)([true|false](.*))/i
-const NO_MORE_ROWS_RX = /no more rows/i
+const TABLE_NAME_RX = /\W+/g
 
 // property values
 const PUT_OPERATION = 'put'
 const DEL_OPERATION = 'del'
+const PK = 'id'
 const KEY = 'key'
 const VALUE = 'value'
 
@@ -32,10 +31,9 @@ const ERR_DB_DNE = 'Database %s does not exist'
 const ERR_INVALID_BATCH_OP = 'Invalid batch operation. Valid operations are "put" and "del"'
 const ERR_INVALID_PARAM = 'Invalid parameter %s must be type %s with valid value'
 const ERR_INVALID_PRIMARY_KEY = 'Database %s table %s does not have its primary key set ' +
-  'to "key" and cannot be used, please re-create the table with the option ' +
-  '"{ primaryKey: \'key\' }" or remove the table and use the "createIfMissing" option' +
+  'to "' + PK + '" and cannot be used, please re-create the table with the option ' +
+  '"{ primaryKey: \'' + PK + '\' }" or remove the table and use the "createIfMissing" option' +
   'in the open method'
-const ERR_NO_DB_HOST = 'No hostname found in location'
 const ERR_NO_DB_TABLE = 'No table found in location'
 const ERR_NO_RETHINK_DRIVER = 'No RethinkDB driver was provided'
 const ERR_NOT_FOUND = 'Key %s not found'
@@ -78,58 +76,6 @@ function asBuffer(value, ensureBuffer = true) {
 }
 
 /**
- * Parses the location string for database connection properties
- * @param {string} location - connection string or table name
- * @return {object}
- */
-function parseLocation (location) {
-  let options = {}
-  let { protocol, auth, hostname, port, query, pathname } = url.parse(location)
-
-  // check for location
-  if (!protocol) {
-    hostname = DEFAULT_RETHINKDB_HOST
-    pathname = `/${location}`
-  }
-
-  // add host
-  if (!hostname) return DOWNError(ERR_NO_DB_HOST)
-  else options.host = hostname
-
-  // add port
-  options.port = port
-    ? port
-    : DEFAULT_RETHINKDB_PORT
-
-  // add db and table
-  let [ , db, table ] = (pathname ? pathname : '').split('/')
-  if (!db) return DOWNError(ERR_NO_DB_TABLE)
-  if (!table) {
-    table = db
-    db = DEFAULT_RETHINKDB_DB
-  }
-  options.db = db
-  options.table = table
-
-  // add authentication
-  let [ user, password ] = (auth ? auth : '').split(':')
-  if (user) options.user = user
-  if (password) options.password = password
-
-  // add timeout option
-  if (query && query.match(TIMEOUT_RX)) {
-    options.timeout = Number(query.replace(TIMEOUT_RX, '$3'))
-  }
-
-  // add silent option (rethinkdbdash)
-  if (query && query.match(SILENT_RX)) {
-    options.silent = Boolean(query.replace(SILENT_RX, '$3'))
-  }
-
-  return options
-}
-
-/**
  * Chained Batch class
  * @extends AbstractChainedBatch
  */
@@ -164,23 +110,23 @@ class RethinkIterator extends AbstractIterator {
 
     // logic ported from mongodown - https://github.com/watson/mongodown
     if (reverse) {
-      if (start) query = query.filter(r.row(KEY).le(start))
-      if (end) query = query.filter(r.row(KEY).ge(end))
-      if (gt) query = query.filter(r.row(KEY).lt(gt))
-      if (gte) query = query.filter(r.row(KEY).le(gte))
-      if (lt) query = query.filter(r.row(KEY).gt(lt))
-      if (lte) query = query.filter(r.row(KEY).ge(lte))
+      if (start) query = query.filter(r.row(PK).le(start))
+      if (end) query = query.filter(r.row(PK).ge(end))
+      if (gt) query = query.filter(r.row(PK).lt(gt))
+      if (gte) query = query.filter(r.row(PK).le(gte))
+      if (lt) query = query.filter(r.row(PK).gt(lt))
+      if (lte) query = query.filter(r.row(PK).ge(lte))
     } else {
-      if (start) query = query.filter(r.row(KEY).ge(start))
-      if (end) query = query.filter(r.row(KEY).le(end))
-      if (gt) query = query.filter(r.row(KEY).gt(gt))
-      if (gte) query = query.filter(r.row(KEY).ge(gte))
-      if (lt) query = query.filter(r.row(KEY).lt(lt))
-      if (lte) query = query.filter(r.row(KEY).le(lte))
+      if (start) query = query.filter(r.row(PK).ge(start))
+      if (end) query = query.filter(r.row(PK).le(end))
+      if (gt) query = query.filter(r.row(PK).gt(gt))
+      if (gte) query = query.filter(r.row(PK).ge(gte))
+      if (lt) query = query.filter(r.row(PK).lt(lt))
+      if (lte) query = query.filter(r.row(PK).le(lte))
     }
 
     // sort the results by key depending on reverse value
-    query = query.orderBy(reverse ? r.desc(KEY) : r.asc(KEY))
+    query = query.orderBy(reverse ? r.desc(PK) : r.asc(PK))
 
     // set limit
     query = (typeof limit === 'number' && limit >= 0)
@@ -209,7 +155,7 @@ class RethinkIterator extends AbstractIterator {
               : callback(DOWNError(error))
           }
 
-          let { key, value } = row
+          let { [PK]:key, value } = row
           key = asBuffer(key, this._keyAsBuffer)
           value = asBuffer(value, this._valueAsBuffer)
           return callback(null, key, value)
@@ -257,23 +203,20 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @param {string} location - connection string in the form rethinkdb://[<user>:<password>@]<host>[:<port>][/<db>]/<table>[?timeout=<timeout>]
    * @param {object} r - rethinkdb driver
    */
-  constructor (location, r) {
+  constructor (location, r, db, options) {
     super(location)
+
+    // validate that the location is a string and replace any invalid characters with _
+    if (typeof location !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'location', 'String'))
 
     // store rethinkdb driver and initialize connection
     this.$r = r
     this.$connection = null
     this.$t = null
+    this.$db = db
+    this.$table = location.replace(TABLE_NAME_RX, '_')
     this.$sync = false
-
-    // parse the connection string for connection options
-    let opts = parseLocation(location)
-    if (opts instanceof Error) throw opts
-
-    let { host, port, db, table, user, password, timeout, silent } = opts
-
-    this.$connectOptions = { host, port, db, user, password, timeout, silent }
-    this.$table = table
+    this.$options = options
   }
 
   /**
@@ -286,7 +229,6 @@ class RethinkDOWN extends AbstractLevelDOWN {
   _open (options, callback) {
     try {
       // support some of the open options
-      let { db } = this.$connectOptions
       let { createIfMissing, errorIfExists } = options
       createIfMissing = typeof createIfMissing === 'boolean'
         ? createIfMissing
@@ -298,36 +240,36 @@ class RethinkDOWN extends AbstractLevelDOWN {
       // processes open options to create or throw error
       let processOptions = (r) => {
         return r.dbList()
-          .contains(db)
+          .contains(this.$db)
           .branch(
-            r.db(db)
+            r.db(this.$db)
               .tableList()
               .contains(this.$table)
               .branch(
                 r.expr(errorIfExists)
                   .branch(
                     r.error(ERR_TABLE_EXISTS),
-                    r.db(db).table(this.$table).config()('primary_key').eq(KEY)
+                    r.db(this.$db).table(this.$table).config()('primary_key').eq(PK)
                       .branch(
                         true,
-                        r.error(util.format(ERR_INVALID_PRIMARY_KEY, db, this.$table))
+                        r.error(util.format(ERR_INVALID_PRIMARY_KEY, this.$db, this.$table))
                       )
                   ),
                 r.expr(createIfMissing)
                   .branch(
-                    r.db(db).tableCreate(this.$table, { primaryKey: KEY }),
+                    r.db(this.$db).tableCreate(this.$table, { primaryKey: PK }),
                     r.error(util.format(ERR_TABLE_DNE, this.$table))
                   )
               ),
             r.expr(createIfMissing)
               .branch(
-                r.dbCreate(db).do(() => r.db(db).tableCreate(this.$table, { primaryKey: KEY })),
-                r.error(util.format(ERR_DB_DNE, db))
+                r.dbCreate(this.$db).do(() => r.db(this.$db).tableCreate(this.$table, { primaryKey: PK })),
+                r.error(util.format(ERR_DB_DNE, this.$db))
               )
           )
           .run(this.$connection, (error) => {
             if (error) return callback(DOWNError(error))
-            this.$t = r.db(db).table(this.$table)
+            this.$t = r.db(this.$db).table(this.$table)
             return callback()
           })
       }
@@ -335,7 +277,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
       // check for standard rethinkdb driver
       if (typeof this.$r.connect === 'function') {
         this.$sync = false
-        return this.$r.connect(this.$connectOptions, (error, connection) => {
+        return this.$r.connect(this.$options, (error, connection) => {
           if (error) return callback(DOWNError(error))
           this.$connection = connection
           return processOptions(this.$r)
@@ -343,7 +285,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
       }
 
       // otherwise use synchronous driver (rethinkdbdash)
-      this.$r = this.$r(this.$connectOptions)
+      this.$r = this.$r(this.$options)
       this.$sync = true
       this.$connection = {}
       return processOptions(this.$r)
@@ -440,7 +382,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
 
       // insert the value using durability an conflict to emulate sync option and avoid
       // branch statements for insert and update
-      return this.$t.insert({ key, value }, { conflict, durability, returnChanges })
+      return this.$t.insert({ [PK]: key, value }, { conflict, durability, returnChanges })
         .pluck('errors', 'first_error')
         .run(this.$connection, (error, results) => {
           if (error) return callback(DOWNError(error))
@@ -530,7 +472,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
       return this.$r.expr(ops).forEach((op) => {
         return op('type').eq(PUT_OPERATION)
           .branch(
-            this.$t.insert({ key: op(KEY), value: op(VALUE) }, { conflict, durability, returnChanges }),
+            this.$t.insert({ [PK]: op(KEY), value: op(VALUE) }, { conflict, durability, returnChanges }),
             this.$t.get(op(KEY))
               .eq(null)
               .branch(
@@ -605,8 +547,15 @@ class RethinkDOWN extends AbstractLevelDOWN {
  * @param {object} r - RethinkDB driver
  * @return {DOWN}
  */
-export default function (r) {
+export default function (r, db, options = {}) {
+  if (typeof db === 'object') {
+    options = db
+    db = DEFAULT_RETHINKDB_DB
+  }
+
+  // check for driver and set db
   if (!r) throw DOWNError(ERR_NO_RETHINK_DRIVER)
+  db = db || DEFAULT_RETHINKDB_DB
 
   /**
    *
@@ -615,7 +564,7 @@ export default function (r) {
    * @constructor
    */
   let DOWN = function (location) {
-    return new RethinkDOWN(location, r)
+    return new RethinkDOWN(location, r, db, options)
   }
 
   /**
@@ -624,27 +573,21 @@ export default function (r) {
    * @callback callback
    * @return {*}
    */
-  DOWN.connect = (location, callback) => {
-    if (typeof location !== 'string') throw DOWNError('requires a location string argument')
-    if (typeof callback !== 'function') throw DOWNError('destroy() requires a callback argument')
-    let opts = parseLocation(location)
-    if (opts instanceof Error) throw DOWNError(opts)
+  let connect = (callback) => {
+    if (typeof callback !== 'function') throw DOWNError(util.format(ERR_REQUIRES_CALLBACK, 'connect'))
 
     try {
-      let { host, port, db, table, user, password, timeout, silent } = opts
-      let connectOptions = { host, port, db, user, password, timeout, silent }
-
       // async connection
       if (typeof r.connect === 'function') {
-        return r.connect(connectOptions, (error, connection) => {
+        return r.connect(options, (error, connection) => {
           if (error) return callback(DOWNError(error))
-          return callback(null, r, connection, opts)
+          return callback(null, r, connection)
         })
       }
 
       // sync connection
-      r = r(connectOptions)
-      return callback(null, r, {}, opts)
+      r = r(options)
+      return callback(null, r, {})
 
     } catch (error) {
       return callback(DOWNError(error))
@@ -658,12 +601,12 @@ export default function (r) {
    * @return {*}
    */
   DOWN.destroy = (location, callback) => {
-    if (typeof callback !== 'function') throw DOWNError('destroy() requires a callback argument')
-
+    if (typeof callback !== 'function') throw DOWNError(util.format(ERR_REQUIRES_CALLBACK, 'destroy'))
+    if (typeof location !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'db', 'String'))
     try {
-      return DOWN.connect(location, (error, cursor, connection, opts) => {
+      let table = location.replace(TABLE_NAME_RX, '_')
+      return connect((error, cursor, connection) => {
         if (error) return callback(DOWNError(error))
-        let { db, table } = opts
         return cursor.db(db)
           .tableDrop(table)
           .run(connection, (error) => {
@@ -677,7 +620,7 @@ export default function (r) {
   }
 
   DOWN.repair = (location, callback) => {
-    if (typeof callback !== 'function') throw DOWNError('repair() requires a callback argument')
+    if (typeof callback !== 'function') throw DOWNError(util.format(ERR_REQUIRES_CALLBACK, 'repair'))
     return callback(DOWNError('repair not implemented'))
   }
 

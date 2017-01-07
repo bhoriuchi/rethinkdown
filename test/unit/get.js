@@ -3,7 +3,7 @@ import rethinkdbdash from 'rethinkdbdash'
 import rethinkdown from '../../index'
 
 function getRecord (key, val, asBuffer, driver, done) {
-  let down = rethinkdown(driver)(rethinkLocation)
+  let down = rethinkdown(driver, dbName, dbOptions)(dbTable)
   down.open({ createIfMissing: true }, (error) => {
     if (error) return done(error)
     return down.get(key, { asBuffer }, (error, value) => {
