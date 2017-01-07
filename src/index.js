@@ -18,6 +18,7 @@ const DEFAULT_RETHINKDB_DB = 'test'
 
 // regex
 const TIMEOUT_RX = /(.*)(timeout=)(\d+)(.*)/i
+const SILENT_RX = /(.*)(silent=)([true|false](.*))/i
 const NO_MORE_ROWS_RX = /no more rows/i
 
 // property values
@@ -115,10 +116,16 @@ function parseLocation (location) {
   if (user) options.user = user
   if (password) options.password = password
 
-  // add timeout
+  // add timeout option
   if (query && query.match(TIMEOUT_RX)) {
     options.timeout = Number(query.replace(TIMEOUT_RX, '$3'))
   }
+
+  // add silent option (rethinkdbdash)
+  if (query && query.match(SILENT_RX)) {
+    options.silent = Boolean(query.replace(SILENT_RX, '$3'))
+  }
+
   return options
 }
 
@@ -181,7 +188,9 @@ class RethinkIterator extends AbstractIterator {
       : query
 
     // run query
-    this._query = query.run(db.$connection, { cursor: true })
+    this._query = db.$sync
+      ? query.run({ cursor: true })
+      : query.run(db.$connection)
   }
 
   /**
@@ -194,22 +203,32 @@ class RethinkIterator extends AbstractIterator {
     try {
       // wait for query to resolve
       return this._query.then((cursor) => {
-        return cursor.next((error, row) => {
-          if (error) {
-            return (typeof error.msg === 'string' && error.msg.match(NO_MORE_ROWS_RX))
-              ? callback()
-              : callback(DOWNError(error))
-          }
-          let { key, value } = row
-          key = asBuffer(key, this._keyAsBuffer)
-          value = asBuffer(value, this._valueAsBuffer)
-          return callback(null, key, value)
-        })
+        try {
+          return cursor.next((error, row) => {
+            if (error) {
+              return (typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX))
+                ? callback()
+                : callback(DOWNError(error))
+            }
+            let { key, value } = row
+            key = asBuffer(key, this._keyAsBuffer)
+            value = asBuffer(value, this._valueAsBuffer)
+            return callback(null, key, value)
+          })
+        } catch (error) {
+          return (typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX))
+            ? callback()
+            : callback(DOWNError(error))
+        }
       }, (error) => {
-        return callback(DOWNError(error))
+        return (typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX))
+          ? callback()
+          : callback(DOWNError(error))
       })
     } catch (error) {
-      return callback(DOWNError(error))
+      return (typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX))
+        ? callback()
+        : callback(DOWNError(error))
     }
   }
 
@@ -257,14 +276,15 @@ class RethinkDOWN extends AbstractLevelDOWN {
     this.$r = r
     this.$connection = null
     this.$t = null
+    this.$sync = false
 
     // parse the connection string for connection options
     let opts = parseLocation(location)
     if (opts instanceof Error) throw opts
 
-    let { host, port, db, table, user, password, timeout } = opts
+    let { host, port, db, table, user, password, timeout, silent } = opts
 
-    this.$connectOptions = { host, port, db, user, password, timeout }
+    this.$connectOptions = { host, port, db, user, password, timeout, silent }
     this.$table = table
   }
 
@@ -278,7 +298,6 @@ class RethinkDOWN extends AbstractLevelDOWN {
   _open (options, callback) {
     try {
       // support some of the open options
-      let r = this.$r
       let { db } = this.$connectOptions
       let { createIfMissing, errorIfExists } = options
       createIfMissing = typeof createIfMissing === 'boolean'
@@ -289,7 +308,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
         : false
 
       // processes open options to create or throw error
-      let processOptions = () => {
+      let processOptions = (r) => {
         return r.dbList()
           .contains(db)
           .branch(
@@ -326,18 +345,20 @@ class RethinkDOWN extends AbstractLevelDOWN {
       }
 
       // check for standard rethinkdb driver
-      if (typeof r.connect === 'function') {
-        return r.connect(this.$connectOptions, (error, connection) => {
+      if (typeof this.$r.connect === 'function') {
+        this.$sync = false
+        return this.$r.connect(this.$connectOptions, (error, connection) => {
           if (error) return callback(DOWNError(error))
           this.$connection = connection
-          return processOptions()
+          return processOptions(this.$r)
         })
       }
 
       // otherwise use synchronous driver (rethinkdbdash)
-      this.$r = r(this.$connectOptions)
+      this.$r = this.$r(this.$connectOptions)
+      this.$sync = true
       this.$connection = {}
-      return processOptions()
+      return processOptions(this.$r)
 
     } catch (error) {
       return callback(DOWNError(error))
@@ -396,7 +417,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
                   return r.expr(asBuffer)
                     .branch(
                       value.coerceTo('BINARY'),
-                      value
+                      value.coerceTo('STRING')
                     )
                 })
             )
@@ -622,8 +643,8 @@ export default function (r) {
     if (opts instanceof Error) throw DOWNError(opts)
 
     try {
-      let { host, port, db, table, user, password, timeout } = opts
-      let connectOptions = { host, port, db, user, password, timeout }
+      let { host, port, db, table, user, password, timeout, silent } = opts
+      let connectOptions = { host, port, db, user, password, timeout, silent }
 
       // async connection
       if (typeof r.connect === 'function') {

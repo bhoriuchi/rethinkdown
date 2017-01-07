@@ -1,3 +1,2 @@
-/**
- * Created by bhoriuchi on 1/5/17.
- */
+require('babel-register')
+require('./index-es6')

@@ -142,6 +142,7 @@ var DEFAULT_RETHINKDB_DB = 'test';
 
 // regex
 var TIMEOUT_RX = /(.*)(timeout=)(\d+)(.*)/i;
+var SILENT_RX = /(.*)(silent=)([true|false](.*))/i;
 var NO_MORE_ROWS_RX = /no more rows/i;
 
 // property values
@@ -248,10 +249,16 @@ function parseLocation(location) {
   if (user) options.user = user;
   if (password) options.password = password;
 
-  // add timeout
+  // add timeout option
   if (query && query.match(TIMEOUT_RX)) {
     options.timeout = Number(query.replace(TIMEOUT_RX, '$3'));
   }
+
+  // add silent option (rethinkdbdash)
+  if (query && query.match(SILENT_RX)) {
+    options.silent = Boolean(query.replace(SILENT_RX, '$3'));
+  }
+
   return options;
 }
 
@@ -338,7 +345,7 @@ var RethinkIterator = function (_AbstractIterator) {
     query = typeof limit === 'number' && limit >= 0 ? query.limit(limit) : query;
 
     // run query
-    _this2._query = query.run(db.$connection, { cursor: true });
+    _this2._query = db.$sync ? query.run({ cursor: true }) : query.run(db.$connection);
     return _this2;
   }
 
@@ -358,22 +365,26 @@ var RethinkIterator = function (_AbstractIterator) {
       try {
         // wait for query to resolve
         return this._query.then(function (cursor) {
-          return cursor.next(function (error, row) {
-            if (error) {
-              return typeof error.msg === 'string' && error.msg.match(NO_MORE_ROWS_RX) ? callback() : callback(DOWNError(error));
-            }
-            var key = row.key,
-                value = row.value;
+          try {
+            return cursor.next(function (error, row) {
+              if (error) {
+                return typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX) ? callback() : callback(DOWNError(error));
+              }
+              var key = row.key,
+                  value = row.value;
 
-            key = asBuffer(key, _this3._keyAsBuffer);
-            value = asBuffer(value, _this3._valueAsBuffer);
-            return callback(null, key, value);
-          });
+              key = asBuffer(key, _this3._keyAsBuffer);
+              value = asBuffer(value, _this3._valueAsBuffer);
+              return callback(null, key, value);
+            });
+          } catch (error) {
+            return typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX) ? callback() : callback(DOWNError(error));
+          }
         }, function (error) {
-          return callback(DOWNError(error));
+          return typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX) ? callback() : callback(DOWNError(error));
         });
       } catch (error) {
-        return callback(DOWNError(error));
+        return typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX) ? callback() : callback(DOWNError(error));
       }
     }
 
@@ -433,6 +444,7 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
     _this4.$r = r;
     _this4.$connection = null;
     _this4.$t = null;
+    _this4.$sync = false;
 
     // parse the connection string for connection options
     var opts = parseLocation(location);
@@ -444,10 +456,11 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
         table = opts.table,
         user = opts.user,
         password = opts.password,
-        timeout = opts.timeout;
+        timeout = opts.timeout,
+        silent = opts.silent;
 
 
-    _this4.$connectOptions = { host: host, port: port, db: db, user: user, password: password, timeout: timeout };
+    _this4.$connectOptions = { host: host, port: port, db: db, user: user, password: password, timeout: timeout, silent: silent };
     _this4.$table = table;
     return _this4;
   }
@@ -469,7 +482,6 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
       try {
         var _ret = function () {
           // support some of the open options
-          var r = _this5.$r;
           var db = _this5.$connectOptions.db;
           var createIfMissing = options.createIfMissing,
               errorIfExists = options.errorIfExists;
@@ -478,7 +490,7 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
           errorIfExists = typeof errorIfExists === 'boolean' ? errorIfExists : false;
 
           // processes open options to create or throw error
-          var processOptions = function processOptions() {
+          var processOptions = function processOptions(r) {
             return r.dbList().contains(db).branch(r.db(db).tableList().contains(_this5.$table).branch(r.expr(errorIfExists).branch(r.error(ERR_TABLE_EXISTS), r.db(db).table(_this5.$table).config()('primary_key').eq(KEY).branch(true, r.error(util.format(ERR_INVALID_PRIMARY_KEY, db, _this5.$table)))), r.expr(createIfMissing).branch(r.db(db).tableCreate(_this5.$table, { primaryKey: KEY }), r.error(util.format(ERR_TABLE_DNE, _this5.$table)))), r.expr(createIfMissing).branch(r.dbCreate(db).do(function () {
               return r.db(db).tableCreate(_this5.$table, { primaryKey: KEY });
             }), r.error(util.format(ERR_DB_DNE, db)))).run(_this5.$connection, function (error) {
@@ -489,21 +501,23 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
           };
 
           // check for standard rethinkdb driver
-          if (typeof r.connect === 'function') {
+          if (typeof _this5.$r.connect === 'function') {
+            _this5.$sync = false;
             return {
-              v: r.connect(_this5.$connectOptions, function (error, connection) {
+              v: _this5.$r.connect(_this5.$connectOptions, function (error, connection) {
                 if (error) return callback(DOWNError(error));
                 _this5.$connection = connection;
-                return processOptions();
+                return processOptions(_this5.$r);
               })
             };
           }
 
           // otherwise use synchronous driver (rethinkdbdash)
-          _this5.$r = r(_this5.$connectOptions);
+          _this5.$r = _this5.$r(_this5.$connectOptions);
+          _this5.$sync = true;
           _this5.$connection = {};
           return {
-            v: processOptions()
+            v: processOptions(_this5.$r)
           };
         }();
 
@@ -562,7 +576,7 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
               return result.eq(null).branch(r.error(util.format(ERR_NOT_FOUND, key)), result(VALUE).default(null).do(function (value) {
                 return r.expr([null, '']).contains(value).or(value.typeOf().eq('ARRAY').and(value.count().eq(0))).branch('', value);
               }).do(function (value) {
-                return r.expr(asBuffer).branch(value.coerceTo('BINARY'), value);
+                return r.expr(asBuffer).branch(value.coerceTo('BINARY'), value.coerceTo('STRING'));
               }));
             }).run(_this6.$connection, function (error, value) {
               return error ? callback(DOWNError(error)) : callback(null, value);
@@ -832,9 +846,10 @@ var index = function (r) {
           table = opts.table,
           user = opts.user,
           password = opts.password,
-          timeout = opts.timeout;
+          timeout = opts.timeout,
+          silent = opts.silent;
 
-      var connectOptions = { host: host, port: port, db: db, user: user, password: password, timeout: timeout };
+      var connectOptions = { host: host, port: port, db: db, user: user, password: password, timeout: timeout, silent: silent };
 
       // async connection
       if (typeof r.connect === 'function') {
