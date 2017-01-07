@@ -200,36 +200,24 @@ class RethinkIterator extends AbstractIterator {
    * @private
    */
   _next (callback) {
-    try {
-      // wait for query to resolve
-      return this._query.then((cursor) => {
-        try {
-          return cursor.next((error, row) => {
-            if (error) {
-              return (typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX))
-                ? callback()
-                : callback(DOWNError(error))
-            }
-            let { key, value } = row
-            key = asBuffer(key, this._keyAsBuffer)
-            value = asBuffer(value, this._valueAsBuffer)
-            return callback(null, key, value)
-          })
-        } catch (error) {
-          return (typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX))
-            ? callback()
-            : callback(DOWNError(error))
-        }
-      }, (error) => {
-        return (typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX))
-          ? callback()
-          : callback(DOWNError(error))
-      })
-    } catch (error) {
-      return (typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX))
-        ? callback()
-        : callback(DOWNError(error))
-    }
+    return this._query.then((cursor) => {
+      try {
+        cursor.next((error, row) => {
+          if (error) {
+            return (error.name === 'ReqlDriverError' && error.message === 'No more rows in the cursor.')
+              ? callback()
+              : callback(DOWNError(error))
+          }
+
+          let { key, value } = row
+          key = asBuffer(key, this._keyAsBuffer)
+          value = asBuffer(value, this._valueAsBuffer)
+          return callback(null, key, value)
+        })
+      } catch (error) {
+        return callback(DOWNError(error))
+      }
+    })
   }
 
   /**
@@ -590,7 +578,7 @@ class RethinkDOWN extends AbstractLevelDOWN {
     }
 
     try {
-      return this.$r.filter((record) => record.ge(start).and(record.le(end)))
+      return this.$t.filter((record) => record.ge(start).and(record.le(end)))
         .count()
         .run(this.$connection, (error, size) => {
           if (error) return callback(DOWNError(error))

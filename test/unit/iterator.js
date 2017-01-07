@@ -6,9 +6,12 @@ function iteratorTest (options, nexts, driver, done) {
   let nextCount = 0
   let down = rethinkdown(driver)(rethinkLocation)
 
-  let cleanup = (error) => {
-    return down.close(() => {
-      return done(error)
+  let cleanup = (error, iter) => {
+    return iter.end((err) => {
+      if (err) done(err)
+      return down.close(() => {
+        return done(error)
+      })
     })
   }
 
@@ -18,10 +21,10 @@ function iteratorTest (options, nexts, driver, done) {
 
     let cb = (error, value) => {
       nextCount++
+      if (error) return cleanup(error, i)
+      if (value === undefined) return cleanup(null, i)
+      if (nextCount >= nexts) return cleanup(null, i)
       console.log(value)
-      if (error) return cleanup(error)
-      if (value === undefined) return cleanup()
-      if (nextCount >= nexts) return cleanup()
       i.next(cb)
     }
 
@@ -31,11 +34,19 @@ function iteratorTest (options, nexts, driver, done) {
 
 export default function testIterator () {
   describe('Test iterator', () => {
-    it('Should iterate through a query rethinkdbdash', (done) => {
-      iteratorTest({}, 10, rethinkdbdash, done)
+    it('Should iterate through a simple query rethinkdbdash', (done) => {
+      iteratorTest({ keyAsBuffer: false, valueAsBuffer: false }, 10, rethinkdbdash, done)
     })
-    it('Should iterate through a query rethinkdb', (done) => {
+    it('Should iterate through a somple query rethinkdb', (done) => {
       iteratorTest({}, 10, rethinkdb, done)
+    })
+
+    it('Should iterate through a complex query rethinkdbdash', (done) => {
+      iteratorTest({
+        keyAsBuffer: false,
+        valueAsBuffer: false,
+        gt: 'rethinkdbdash'
+      }, 10, rethinkdbdash, done)
     })
   })
 }

@@ -143,8 +143,6 @@ var DEFAULT_RETHINKDB_DB = 'test';
 // regex
 var TIMEOUT_RX = /(.*)(timeout=)(\d+)(.*)/i;
 var SILENT_RX = /(.*)(silent=)([true|false](.*))/i;
-var NO_MORE_ROWS_RX = /no more rows/i;
-
 // property values
 var PUT_OPERATION = 'put';
 var DEL_OPERATION = 'del';
@@ -362,30 +360,24 @@ var RethinkIterator = function (_AbstractIterator) {
     value: function _next(callback) {
       var _this3 = this;
 
-      try {
-        // wait for query to resolve
-        return this._query.then(function (cursor) {
-          try {
-            return cursor.next(function (error, row) {
-              if (error) {
-                return typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX) ? callback() : callback(DOWNError(error));
-              }
-              var key = row.key,
-                  value = row.value;
+      return this._query.then(function (cursor) {
+        try {
+          cursor.next(function (error, row) {
+            if (error) {
+              return error.name === 'ReqlDriverError' && error.message === 'No more rows in the cursor.' ? callback() : callback(DOWNError(error));
+            }
 
-              key = asBuffer(key, _this3._keyAsBuffer);
-              value = asBuffer(value, _this3._valueAsBuffer);
-              return callback(null, key, value);
-            });
-          } catch (error) {
-            return typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX) ? callback() : callback(DOWNError(error));
-          }
-        }, function (error) {
-          return typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX) ? callback() : callback(DOWNError(error));
-        });
-      } catch (error) {
-        return typeof error.message === 'string' && error.message.match(NO_MORE_ROWS_RX) ? callback() : callback(DOWNError(error));
-      }
+            var key = row.key,
+                value = row.value;
+
+            key = asBuffer(key, _this3._keyAsBuffer);
+            value = asBuffer(value, _this3._valueAsBuffer);
+            return callback(null, key, value);
+          });
+        } catch (error) {
+          return callback(DOWNError(error));
+        }
+      });
     }
 
     /**
@@ -780,7 +772,7 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
       }
 
       try {
-        return this.$r.filter(function (record) {
+        return this.$t.filter(function (record) {
           return record.ge(start).and(record.le(end));
         }).count().run(this.$connection, function (error, size) {
           if (error) return callback(DOWNError(error));

@@ -4,6 +4,7 @@ import testGet from './get'
 import testDel from './del'
 import testBatch from './batch'
 import testIterator from './iterator'
+import testApproximateSize from './approximateSize'
 
 export default function unitTests () {
   describe('Unit Tests', () => {
@@ -13,5 +14,6 @@ export default function unitTests () {
     testDel()
     testBatch()
     testIterator()
+    testApproximateSize()
   })
 }
