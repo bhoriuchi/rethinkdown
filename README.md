@@ -40,8 +40,9 @@ import rethinkdown from 'rethinkdown'
 let db = rethinkdown(rethinkdbdash)
 
 ```
+---
 
-##### `rethinkdown` ( `location` )
+##### rethinkdown ( `location` )
 
 returns a new RethinkDOWN instance
 
@@ -51,7 +52,9 @@ returns a new RethinkDOWN instance
 
 **Returns** {[`RethinkDOWN`](https://github.com/bhoriuchi/rethinkdown)}
 
-##### location
+---
+
+#### location
 
 The location connection string takes the following format
 
