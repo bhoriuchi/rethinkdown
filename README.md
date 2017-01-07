@@ -80,5 +80,6 @@ If a string not prefixed by `rethinkdb://` is supplied it will be assumed as the
 "rethinkdb://my.domain.com/test/leveldb?timeout=1000"
 "rethinkdb://my.domain.com/test/leveldb?silent=true"
 "rethinkdb://my.domain.com/test/leveldb?timeout=100&silent=true"
+"rethinkdb://me:mypassword@my.domain.com/test/leveldb"
 "leveldb"
 ```
