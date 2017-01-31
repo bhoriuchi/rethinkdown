@@ -4,7 +4,6 @@
  * @author Branden Horiuchi <bhoriuchi@gmail.com>
  */
 import util from 'util'
-import url from 'url'
 import {
   AbstractLevelDOWN,
   AbstractIterator,
@@ -102,7 +101,8 @@ class RethinkIterator extends AbstractIterator {
   constructor (db, options = {}) {
     super(db)
     let r = db.$r
-    let query = db.$t
+    let query = db.singleTable ? db.$t.filter({ location: db.location }) : db.$t
+    let KEY_FIELD = db.singleTable ? KEY : PK
 
     let { gt, gte, lt, lte, start, end, reverse, keys, values, limit, keyAsBuffer, valueAsBuffer } = options
     this._keyAsBuffer = keyAsBuffer !== false
@@ -110,23 +110,23 @@ class RethinkIterator extends AbstractIterator {
 
     // logic ported from mongodown - https://github.com/watson/mongodown
     if (reverse) {
-      if (start) query = query.filter(r.row(PK).le(start))
-      if (end) query = query.filter(r.row(PK).ge(end))
-      if (gt) query = query.filter(r.row(PK).lt(gt))
-      if (gte) query = query.filter(r.row(PK).le(gte))
-      if (lt) query = query.filter(r.row(PK).gt(lt))
-      if (lte) query = query.filter(r.row(PK).ge(lte))
+      if (start) query = query.filter(r.row(KEY_FIELD).le(start))
+      if (end) query = query.filter(r.row(KEY_FIELD).ge(end))
+      if (gt) query = query.filter(r.row(KEY_FIELD).lt(gt))
+      if (gte) query = query.filter(r.row(KEY_FIELD).le(gte))
+      if (lt) query = query.filter(r.row(KEY_FIELD).gt(lt))
+      if (lte) query = query.filter(r.row(KEY_FIELD).ge(lte))
     } else {
-      if (start) query = query.filter(r.row(PK).ge(start))
-      if (end) query = query.filter(r.row(PK).le(end))
-      if (gt) query = query.filter(r.row(PK).gt(gt))
-      if (gte) query = query.filter(r.row(PK).ge(gte))
-      if (lt) query = query.filter(r.row(PK).lt(lt))
-      if (lte) query = query.filter(r.row(PK).le(lte))
+      if (start) query = query.filter(r.row(KEY_FIELD).ge(start))
+      if (end) query = query.filter(r.row(KEY_FIELD).le(end))
+      if (gt) query = query.filter(r.row(KEY_FIELD).gt(gt))
+      if (gte) query = query.filter(r.row(KEY_FIELD).ge(gte))
+      if (lt) query = query.filter(r.row(KEY_FIELD).lt(lt))
+      if (lte) query = query.filter(r.row(KEY_FIELD).le(lte))
     }
 
     // sort the results by key depending on reverse value
-    query = query.orderBy(reverse ? r.desc(PK) : r.asc(PK))
+    query = query.orderBy(reverse ? r.desc(KEY_FIELD) : r.asc(KEY_FIELD))
 
     // set limit
     query = (typeof limit === 'number' && limit >= 0)
@@ -155,7 +155,9 @@ class RethinkIterator extends AbstractIterator {
               : callback(DOWNError(error))
           }
 
-          let { [PK]:key, value } = row
+          let key = this.db.singleTable ? row.key : row[PK]
+          let value = row.value
+
           key = asBuffer(key, this._keyAsBuffer)
           value = asBuffer(value, this._valueAsBuffer)
           return callback(null, key, value)
@@ -203,18 +205,24 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @param {string} location - connection string in the form rethinkdb://[<user>:<password>@]<host>[:<port>][/<db>]/<table>[?timeout=<timeout>]
    * @param {object} r - rethinkdb driver
    */
-  constructor (location, r, db, options) {
+  constructor (location, r, db, options = {}) {
     super(location)
 
     // validate that the location is a string and replace any invalid characters with _
     if (typeof location !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'location', 'String'))
+
+    // check for single table
+    this.singleTable = (typeof options.singleTable === 'string')
+      ? options.singleTable
+      : null
+    delete options.singleTable
 
     // store rethinkdb driver and initialize connection
     this.$r = r
     this.$connection = null
     this.$t = null
     this.$db = db
-    this.$table = location.replace(TABLE_NAME_RX, '_')
+    this.$table = this.singleTable || location.replace(TABLE_NAME_RX, '_')
     this.$sync = false
     this.$options = options
   }
@@ -248,7 +256,18 @@ class RethinkDOWN extends AbstractLevelDOWN {
               .branch(
                 r.expr(errorIfExists)
                   .branch(
-                    r.error(ERR_TABLE_EXISTS),
+                    r.expr(this.singleTable).eq(null).branch(
+                      r.error(ERR_TABLE_EXISTS),
+                      r.db(this.$db)
+                        .table(this.$table)
+                        .filter({ location: this.location })
+                        .count()
+                        .ne(0)
+                        .branch(
+                          r.error(ERR_TABLE_EXISTS),
+                          true
+                        )
+                    ),
                     r.db(this.$db).table(this.$table).config()('primary_key').eq(PK)
                       .branch(
                         true,
@@ -325,12 +344,14 @@ class RethinkDOWN extends AbstractLevelDOWN {
   _get (key, options, callback) {
     try {
       let r = this.$r
-      let table = this.$t
       let { asBuffer } = options
 
+      let query = this.singleTable
+        ? this.$t.filter({ location: this.location, key }).nth(0)
+        : this.$t.get(key)
+
       // get the key
-      return table.get(key)
-        .default(null)
+      return query.default(null)
         .do((result) => {
           return result.eq(null)
             .branch(
@@ -363,6 +384,27 @@ class RethinkDOWN extends AbstractLevelDOWN {
   }
 
   /**
+   * reusable put mutation builder
+   * @param key
+   * @param value
+   * @param opts
+   * @returns {*}
+   */
+  $put (key, value, opts) {
+    if (this.singleTable) {
+      return this.$t.filter({ key, location: this.location })
+        .coerceTo('ARRAY')
+        .do((records) => {
+          return records.count().ne(0).branch(
+            this.$t.get(records.nth(0)(PK)).update({ value }, opts),
+            this.$t.insert({ key, value, location: this.location }, Object.assign({ conflict: 'update' }, opts))
+          )
+        })
+    }
+    return this.$t.insert({ [PK]: key, value }, Object.assign({ conflict: 'update' }, opts))
+  }
+
+  /**
    * adds a value at a specific key
    * @param {string|buffer} key
    * @param {string|buffer} value
@@ -374,15 +416,13 @@ class RethinkDOWN extends AbstractLevelDOWN {
   _put (key, value, options, callback) {
     try {
       let { sync } = options
-      let conflict = 'update'
-      let returnChanges = true
       let durability = (sync === true)
         ? 'hard'
         : 'soft'
 
       // insert the value using durability an conflict to emulate sync option and avoid
       // branch statements for insert and update
-      return this.$t.insert({ [PK]: key, value }, { conflict, durability, returnChanges })
+      return this.$put(key, value, { durability })
         .pluck('errors', 'first_error')
         .run(this.$connection, (error, results) => {
           if (error) return callback(DOWNError(error))
@@ -396,6 +436,31 @@ class RethinkDOWN extends AbstractLevelDOWN {
   }
 
   /**
+   * reusable del mutation builder
+   * @param key
+   * @param opts
+   * @returns {*}
+   */
+  $del (key, opts) {
+    if (this.singleTable) {
+      return this.$t.filter({ key, location: this.location })
+        .coerceTo('ARRAY')
+        .do((records) => {
+          return records.count().ne(0).branch(
+            this.$t.get(records.nth(0)(PK)).delete(opts),
+            this.$r.error(util.format(ERR_NOT_FOUND, key)),
+          )
+        })
+    }
+    return this.$t.get(key)
+      .eq(null)
+      .branch(
+        this.$r.error(util.format(ERR_NOT_FOUND, key)),
+        this.$t.get(key).delete(opts)
+      )
+  }
+
+  /**
    * Deletes a key
    * @param {string|buffer} key
    * @param {object} [options]
@@ -406,18 +471,12 @@ class RethinkDOWN extends AbstractLevelDOWN {
   _del (key, options, callback) {
     try {
       let { sync } = options
-      let returnChanges = true
       let durability = (sync === true)
         ? 'hard'
         : 'soft'
 
       // delete the record
-      return this.$t.get(key)
-        .eq(null)
-        .branch(
-          this.$r.error(util.format(ERR_NOT_FOUND, key)),
-          this.$t.get(key).delete({ durability, returnChanges })
-        )
+      return this.$del(key, { durability })
         .pluck('errors', 'first_error')
         .run(this.$connection, (error, results) => {
           if (error) return callback(DOWNError(error))
@@ -441,8 +500,6 @@ class RethinkDOWN extends AbstractLevelDOWN {
     try {
       let ops = []
       let { sync } = options
-      let returnChanges = true
-      let conflict = 'update'
       let durability = (sync === true)
         ? 'hard'
         : 'soft'
@@ -472,13 +529,8 @@ class RethinkDOWN extends AbstractLevelDOWN {
       return this.$r.expr(ops).forEach((op) => {
         return op('type').eq(PUT_OPERATION)
           .branch(
-            this.$t.insert({ [PK]: op(KEY), value: op(VALUE) }, { conflict, durability, returnChanges }),
-            this.$t.get(op(KEY))
-              .eq(null)
-              .branch(
-                this.$r.error(util.format(ERR_NOT_FOUND, op(KEY))),
-                this.$t.get(op(KEY)).delete({ durability, returnChanges })
-              )
+            this.$put(op(KEY), op(VALUE), { durability }),
+            this.$del(op(KEY), { durability })
           )
       })
         .pluck('errors', 'first_error')
@@ -511,14 +563,6 @@ class RethinkDOWN extends AbstractLevelDOWN {
    * @private
    */
   _approximateSize (start, end, callback) {
-    if (typeof callback !== 'function') {
-      throw DOWNError(util.format(ERR_REQUIRES_CALLBACK, 'approximateSize'))
-    } else if (typeof start !== 'string' && !(start instanceof Buffer)) {
-      return callback(DOWNError(util.format(ERR_INVALID_PARAM, 'start', 'string or Buffer')))
-    } else if (typeof end !== 'string' && !(end instanceof Buffer)) {
-      return callback(DOWNError(util.format(ERR_INVALID_PARAM, 'end', 'string or Buffer')))
-    }
-
     try {
       return this.$t.filter((record) => record.ge(start).and(record.le(end)))
         .count()
@@ -602,13 +646,42 @@ export default function (r, db, options = {}) {
    */
   DOWN.destroy = (location, callback) => {
     if (typeof callback !== 'function') throw DOWNError(util.format(ERR_REQUIRES_CALLBACK, 'destroy'))
-    if (typeof location !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'db', 'String'))
+    if (typeof location !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'location', 'String'))
     try {
       let table = location.replace(TABLE_NAME_RX, '_')
       return connect((error, cursor, connection) => {
         if (error) return callback(DOWNError(error))
+
         return cursor.db(db)
           .tableDrop(table)
+          .run(connection, (error) => {
+            if (error ) callback(DOWNError(error))
+            return callback()
+          })
+      })
+    } catch (error) {
+      return callback(DOWNError(error))
+    }
+  }
+
+  /**
+   * Destroys a singlemode database
+   * @param {string} location - connection string
+   * @callback callback
+   * @return {*}
+   */
+  DOWN.destroySingle = (singleTable, location, callback) => {
+    if (typeof callback !== 'function') throw DOWNError(util.format(ERR_REQUIRES_CALLBACK, 'destroy'))
+    if (typeof singleTable !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'singleTable', 'String'))
+    if (typeof location !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'location', 'String'))
+    try {
+      return connect((error, cursor, connection) => {
+        if (error) return callback(DOWNError(error))
+
+        return cursor.db(db)
+          .table(singleTable)
+          .filter({ location })
+          .delete()
           .run(connection, (error) => {
             if (error ) callback(DOWNError(error))
             return callback()

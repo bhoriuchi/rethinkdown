@@ -3,7 +3,6 @@
 function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
 
 var util = _interopDefault(require('util'));
-var url = _interopDefault(require('url'));
 var abstractLeveldown = require('abstract-leveldown');
 
 var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) {
@@ -200,7 +199,8 @@ var RethinkIterator = function (_AbstractIterator) {
     var _this2 = possibleConstructorReturn(this, (RethinkIterator.__proto__ || Object.getPrototypeOf(RethinkIterator)).call(this, db));
 
     var r = db.$r;
-    var query = db.$t;
+    var query = db.singleTable ? db.$t.filter({ location: db.location }) : db.$t;
+    var KEY_FIELD = db.singleTable ? KEY : PK;
 
     var gt = options.gt,
         gte = options.gte,
@@ -220,23 +220,23 @@ var RethinkIterator = function (_AbstractIterator) {
 
     // logic ported from mongodown - https://github.com/watson/mongodown
     if (reverse) {
-      if (start) query = query.filter(r.row(PK).le(start));
-      if (end) query = query.filter(r.row(PK).ge(end));
-      if (gt) query = query.filter(r.row(PK).lt(gt));
-      if (gte) query = query.filter(r.row(PK).le(gte));
-      if (lt) query = query.filter(r.row(PK).gt(lt));
-      if (lte) query = query.filter(r.row(PK).ge(lte));
+      if (start) query = query.filter(r.row(KEY_FIELD).le(start));
+      if (end) query = query.filter(r.row(KEY_FIELD).ge(end));
+      if (gt) query = query.filter(r.row(KEY_FIELD).lt(gt));
+      if (gte) query = query.filter(r.row(KEY_FIELD).le(gte));
+      if (lt) query = query.filter(r.row(KEY_FIELD).gt(lt));
+      if (lte) query = query.filter(r.row(KEY_FIELD).ge(lte));
     } else {
-      if (start) query = query.filter(r.row(PK).ge(start));
-      if (end) query = query.filter(r.row(PK).le(end));
-      if (gt) query = query.filter(r.row(PK).gt(gt));
-      if (gte) query = query.filter(r.row(PK).ge(gte));
-      if (lt) query = query.filter(r.row(PK).lt(lt));
-      if (lte) query = query.filter(r.row(PK).le(lte));
+      if (start) query = query.filter(r.row(KEY_FIELD).ge(start));
+      if (end) query = query.filter(r.row(KEY_FIELD).le(end));
+      if (gt) query = query.filter(r.row(KEY_FIELD).gt(gt));
+      if (gte) query = query.filter(r.row(KEY_FIELD).ge(gte));
+      if (lt) query = query.filter(r.row(KEY_FIELD).lt(lt));
+      if (lte) query = query.filter(r.row(KEY_FIELD).le(lte));
     }
 
     // sort the results by key depending on reverse value
-    query = query.orderBy(reverse ? r.desc(PK) : r.asc(PK));
+    query = query.orderBy(reverse ? r.desc(KEY_FIELD) : r.asc(KEY_FIELD));
 
     // set limit
     query = typeof limit === 'number' && limit >= 0 ? query.limit(limit) : query;
@@ -266,8 +266,8 @@ var RethinkIterator = function (_AbstractIterator) {
               return error.name === 'ReqlDriverError' && error.message === 'No more rows in the cursor.' ? callback() : callback(DOWNError(error));
             }
 
-            var key = row[PK],
-                value = row.value;
+            var key = _this3.db.singleTable ? row.key : row[PK];
+            var value = row.value;
 
             key = asBuffer(key, _this3._keyAsBuffer);
             value = asBuffer(value, _this3._valueAsBuffer);
@@ -326,7 +326,8 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
    * @param {string} location - connection string in the form rethinkdb://[<user>:<password>@]<host>[:<port>][/<db>]/<table>[?timeout=<timeout>]
    * @param {object} r - rethinkdb driver
    */
-  function RethinkDOWN(location, r, db, options) {
+  function RethinkDOWN(location, r, db) {
+    var options = arguments.length > 3 && arguments[3] !== undefined ? arguments[3] : {};
     classCallCheck(this, RethinkDOWN);
 
     // validate that the location is a string and replace any invalid characters with _
@@ -334,12 +335,16 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
 
     if (typeof location !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'location', 'String'));
 
+    // check for single table
+    _this4.singleTable = typeof options.singleTable === 'string' ? options.singleTable : null;
+    delete options.singleTable;
+
     // store rethinkdb driver and initialize connection
     _this4.$r = r;
     _this4.$connection = null;
     _this4.$t = null;
     _this4.$db = db;
-    _this4.$table = location.replace(TABLE_NAME_RX, '_');
+    _this4.$table = _this4.singleTable || location.replace(TABLE_NAME_RX, '_');
     _this4.$sync = false;
     _this4.$options = options;
     return _this4;
@@ -370,7 +375,7 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
 
           // processes open options to create or throw error
           var processOptions = function processOptions(r) {
-            return r.dbList().contains(_this5.$db).branch(r.db(_this5.$db).tableList().contains(_this5.$table).branch(r.expr(errorIfExists).branch(r.error(ERR_TABLE_EXISTS), r.db(_this5.$db).table(_this5.$table).config()('primary_key').eq(PK).branch(true, r.error(util.format(ERR_INVALID_PRIMARY_KEY, _this5.$db, _this5.$table)))), r.expr(createIfMissing).branch(r.db(_this5.$db).tableCreate(_this5.$table, { primaryKey: PK }), r.error(util.format(ERR_TABLE_DNE, _this5.$table)))), r.expr(createIfMissing).branch(r.dbCreate(_this5.$db).do(function () {
+            return r.dbList().contains(_this5.$db).branch(r.db(_this5.$db).tableList().contains(_this5.$table).branch(r.expr(errorIfExists).branch(r.expr(_this5.singleTable).eq(null).branch(r.error(ERR_TABLE_EXISTS), r.db(_this5.$db).table(_this5.$table).filter({ location: _this5.location }).count().ne(0).branch(r.error(ERR_TABLE_EXISTS), true)), r.db(_this5.$db).table(_this5.$table).config()('primary_key').eq(PK).branch(true, r.error(util.format(ERR_INVALID_PRIMARY_KEY, _this5.$db, _this5.$table)))), r.expr(createIfMissing).branch(r.db(_this5.$db).tableCreate(_this5.$table, { primaryKey: PK }), r.error(util.format(ERR_TABLE_DNE, _this5.$table)))), r.expr(createIfMissing).branch(r.dbCreate(_this5.$db).do(function () {
               return r.db(_this5.$db).tableCreate(_this5.$table, { primaryKey: PK });
             }), r.error(util.format(ERR_DB_DNE, _this5.$db)))).run(_this5.$connection, function (error) {
               if (error) return callback(DOWNError(error));
@@ -445,13 +450,14 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
       try {
         var _ret2 = function () {
           var r = _this6.$r;
-          var table = _this6.$t;
           var asBuffer = options.asBuffer;
 
-          // get the key
 
+          var query = _this6.singleTable ? _this6.$t.filter({ location: _this6.location, key: key }).nth(0) : _this6.$t.get(key);
+
+          // get the key
           return {
-            v: table.get(key).default(null).do(function (result) {
+            v: query.default(null).do(function (result) {
               return result.eq(null).branch(r.error(util.format(ERR_NOT_FOUND, key)), result(VALUE).default(null).do(function (value) {
                 return r.expr([null, '']).contains(value).or(value.typeOf().eq('ARRAY').and(value.count().eq(0))).branch('', value);
               }).do(function (value) {
@@ -470,6 +476,28 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
     }
 
     /**
+     * reusable put mutation builder
+     * @param key
+     * @param value
+     * @param opts
+     * @returns {*}
+     */
+
+  }, {
+    key: '$put',
+    value: function $put(key, value, opts) {
+      var _this7 = this,
+          _$t$insert;
+
+      if (this.singleTable) {
+        return this.$t.filter({ key: key, location: this.location }).coerceTo('ARRAY').do(function (records) {
+          return records.count().ne(0).branch(_this7.$t.get(records.nth(0)(PK)).update({ value: value }, opts), _this7.$t.insert({ key: key, value: value, location: _this7.location }, Object.assign({ conflict: 'update' }, opts)));
+        });
+      }
+      return this.$t.insert((_$t$insert = {}, defineProperty(_$t$insert, PK, key), defineProperty(_$t$insert, 'value', value), _$t$insert), Object.assign({ conflict: 'update' }, opts));
+    }
+
+    /**
      * adds a value at a specific key
      * @param {string|buffer} key
      * @param {string|buffer} value
@@ -483,17 +511,13 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
     key: '_put',
     value: function _put(key, value, options, callback) {
       try {
-        var _$t$insert;
-
         var sync = options.sync;
 
-        var conflict = 'update';
-        var returnChanges = true;
         var durability = sync === true ? 'hard' : 'soft';
 
         // insert the value using durability an conflict to emulate sync option and avoid
         // branch statements for insert and update
-        return this.$t.insert((_$t$insert = {}, defineProperty(_$t$insert, PK, key), defineProperty(_$t$insert, 'value', value), _$t$insert), { conflict: conflict, durability: durability, returnChanges: returnChanges }).pluck('errors', 'first_error').run(this.$connection, function (error, results) {
+        return this.$put(key, value, { durability: durability }).pluck('errors', 'first_error').run(this.$connection, function (error, results) {
           if (error) return callback(DOWNError(error));
           var errors = results.errors,
               first_error = results.first_error;
@@ -504,6 +528,26 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
       } catch (error) {
         return callback(DOWNError(error));
       }
+    }
+
+    /**
+     * reusable del mutation builder
+     * @param key
+     * @param opts
+     * @returns {*}
+     */
+
+  }, {
+    key: '$del',
+    value: function $del(key, opts) {
+      var _this8 = this;
+
+      if (this.singleTable) {
+        return this.$t.filter({ key: key, location: this.location }).coerceTo('ARRAY').do(function (records) {
+          return records.count().ne(0).branch(_this8.$t.get(records.nth(0)(PK)).delete(opts), _this8.$r.error(util.format(ERR_NOT_FOUND, key)));
+        });
+      }
+      return this.$t.get(key).eq(null).branch(this.$r.error(util.format(ERR_NOT_FOUND, key)), this.$t.get(key).delete(opts));
     }
 
     /**
@@ -521,11 +565,10 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
       try {
         var sync = options.sync;
 
-        var returnChanges = true;
         var durability = sync === true ? 'hard' : 'soft';
 
         // delete the record
-        return this.$t.get(key).eq(null).branch(this.$r.error(util.format(ERR_NOT_FOUND, key)), this.$t.get(key).delete({ durability: durability, returnChanges: returnChanges })).pluck('errors', 'first_error').run(this.$connection, function (error, results) {
+        return this.$del(key, { durability: durability }).pluck('errors', 'first_error').run(this.$connection, function (error, results) {
           if (error) return callback(DOWNError(error));
           var errors = results.errors,
               first_error = results.first_error;
@@ -549,15 +592,13 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
   }, {
     key: '_batch',
     value: function _batch(operations, options, callback) {
-      var _this7 = this;
+      var _this9 = this;
 
       try {
         var _ret3 = function () {
           var ops = [];
           var sync = options.sync;
 
-          var returnChanges = true;
-          var conflict = 'update';
           var durability = sync === true ? 'hard' : 'soft';
 
           // validate the operations list
@@ -577,7 +618,7 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
               switch (type) {
                 case PUT_OPERATION:
                   // coerce the value into a valid value
-                  value = _this7._serializeValue(value);
+                  value = _this9._serializeValue(value);
                   ops.push({ type: PUT_OPERATION, key: key, value: value });
                   break;
 
@@ -609,11 +650,9 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
           }
 
           return {
-            v: _this7.$r.expr(ops).forEach(function (op) {
-              var _this7$$t$insert;
-
-              return op('type').eq(PUT_OPERATION).branch(_this7.$t.insert((_this7$$t$insert = {}, defineProperty(_this7$$t$insert, PK, op(KEY)), defineProperty(_this7$$t$insert, 'value', op(VALUE)), _this7$$t$insert), { conflict: conflict, durability: durability, returnChanges: returnChanges }), _this7.$t.get(op(KEY)).eq(null).branch(_this7.$r.error(util.format(ERR_NOT_FOUND, op(KEY))), _this7.$t.get(op(KEY)).delete({ durability: durability, returnChanges: returnChanges })));
-            }).pluck('errors', 'first_error').run(_this7.$connection, function (error, results) {
+            v: _this9.$r.expr(ops).forEach(function (op) {
+              return op('type').eq(PUT_OPERATION).branch(_this9.$put(op(KEY), op(VALUE), { durability: durability }), _this9.$del(op(KEY), { durability: durability }));
+            }).pluck('errors', 'first_error').run(_this9.$connection, function (error, results) {
               if (error) return callback(DOWNError(error));
               var errors = results.errors,
                   first_error = results.first_error;
@@ -654,14 +693,6 @@ var RethinkDOWN = function (_AbstractLevelDOWN) {
   }, {
     key: '_approximateSize',
     value: function _approximateSize(start, end, callback) {
-      if (typeof callback !== 'function') {
-        throw DOWNError(util.format(ERR_REQUIRES_CALLBACK, 'approximateSize'));
-      } else if (typeof start !== 'string' && !(start instanceof Buffer)) {
-        return callback(DOWNError(util.format(ERR_INVALID_PARAM, 'start', 'string or Buffer')));
-      } else if (typeof end !== 'string' && !(end instanceof Buffer)) {
-        return callback(DOWNError(util.format(ERR_INVALID_PARAM, 'end', 'string or Buffer')));
-      }
-
       try {
         return this.$t.filter(function (record) {
           return record.ge(start).and(record.le(end));
@@ -753,13 +784,14 @@ var index = function (r, db) {
    */
   DOWN.destroy = function (location, callback) {
     if (typeof callback !== 'function') throw DOWNError(util.format(ERR_REQUIRES_CALLBACK, 'destroy'));
-    if (typeof location !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'db', 'String'));
+    if (typeof location !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'location', 'String'));
     try {
       var _ret4 = function () {
         var table = location.replace(TABLE_NAME_RX, '_');
         return {
           v: connect(function (error, cursor, connection) {
             if (error) return callback(DOWNError(error));
+
             return cursor.db(db).tableDrop(table).run(connection, function (error) {
               if (error) callback(DOWNError(error));
               return callback();
@@ -769,6 +801,30 @@ var index = function (r, db) {
       }();
 
       if ((typeof _ret4 === 'undefined' ? 'undefined' : _typeof(_ret4)) === "object") return _ret4.v;
+    } catch (error) {
+      return callback(DOWNError(error));
+    }
+  };
+
+  /**
+   * Destroys a singlemode database
+   * @param {string} location - connection string
+   * @callback callback
+   * @return {*}
+   */
+  DOWN.destroySingle = function (singleTable, location, callback) {
+    if (typeof callback !== 'function') throw DOWNError(util.format(ERR_REQUIRES_CALLBACK, 'destroy'));
+    if (typeof singleTable !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'singleTable', 'String'));
+    if (typeof location !== 'string') throw DOWNError(util.format(ERR_INVALID_PARAM, 'location', 'String'));
+    try {
+      return connect(function (error, cursor, connection) {
+        if (error) return callback(DOWNError(error));
+
+        return cursor.db(db).table(singleTable).filter({ location: location }).delete().run(connection, function (error) {
+          if (error) callback(DOWNError(error));
+          return callback();
+        });
+      });
     } catch (error) {
       return callback(DOWNError(error));
     }

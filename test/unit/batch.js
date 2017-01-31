@@ -16,6 +16,20 @@ function batchRecord (ops, driver, done) {
   })
 }
 
+function batchSingle (ops, driver, done) {
+  let down = rethinkdown(driver, dbName, Object.assign({ singleTable }, dbOptions))(dbTable)
+  down.open({ createIfMissing: true }, (error) => {
+    if (error) return done(error)
+    return down.batch(ops, (error) => {
+      if (error) return done(error)
+      return down.close((error) => {
+        if (error) return done(error)
+        return done()
+      })
+    })
+  })
+}
+
 const ops1dash = [
   { type: 'put', key: 'rethinkdbdashbatch1', value: 'dashb1value' },
   { type: 'put', key: 'rethinkdbdashbatch2', value: 'dashb2value' },
@@ -54,6 +68,22 @@ export default function testBatch () {
     })
     it('Should batch add and del using rethinkdb', (done) => {
       batchRecord(ops2db, rethinkdb, done)
+    })
+  })
+
+  describe('Test batch method in single mode', () => {
+    it('Should batch add using rethinkdbdash', (done) => {
+      batchSingle(ops1dash, rethinkdbdash, done)
+    })
+    it('Should batch add using rethinkdb', (done) => {
+      batchSingle(ops1db, rethinkdb, done)
+    })
+
+    it('Should batch add and del using rethinkdbdash', (done) => {
+      batchSingle(ops2dash, rethinkdbdash, done)
+    })
+    it('Should batch add and del using rethinkdb', (done) => {
+      batchSingle(ops2db, rethinkdb, done)
     })
   })
 }
