@@ -46,6 +46,7 @@ A `RethinDOWN` instance needs to first be initialized with either a `rethinkdb` 
 * [`database="test"`] {[`String`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String)} - Database name to use
 * [`connectOptions`] {[`Object`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object)} - A rethinkdb or rethinkdbdash [connect](https://rethinkdb.com/api/javascript/connect/) options object
 * [`connectOptions.singleTable`] {[`String`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String)} - Single mode table name
+
 **Returns** {[`rethinkdown`](#rethinkdown)} - Instance of `rethinkdown` that can be passed a location/table
 
 ###### Example
@@ -78,3 +79,14 @@ The location should be the name of the table that should be used as the LevelDB 
 #### Single-Mode `since v0.3.0`
 
 Single mode allows the same table to be used for all `level` databases. The table name specified by `connectOptions.singleTable` will store all data and the `location` will be added as a value in each record so that multiple databases can be stored in the same table.
+
+###### Single Mode Example
+
+```js
+import r from 'rethinkdb'
+import RethinkDOWN from 'rethinkdown'
+
+let rethinkdown = RethinkDOWN(r, 'test', { singleTable: 'myleveldb' })
+let db1 = rethinkdown('db1')
+let db2 = rethinkdown('db2')
+```
